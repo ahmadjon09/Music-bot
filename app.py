@@ -17,6 +17,21 @@ Space shows a helpful page instead of crash-looping.
 
 from __future__ import annotations
 
+# ── ZeroGPU compatibility shim (must run before gradio is imported) ─────────
+# Some Hugging Face Spaces sit on ZeroGPU hardware, which kills the container
+# during startup ("No @spaces.GPU function detected during startup") unless
+# the app defines a @spaces.GPU function. This bot is pure CPU work, so we
+# register a tiny no-op purely to satisfy that platform check. Off ZeroGPU the
+# decorator is a no-op; without the `spaces` package nothing changes at all.
+try:
+    import spaces
+
+    @spaces.GPU(duration=1)
+    def _zerogpu_warmup() -> str:  # never called — its existence is the point
+        return "ok"
+except Exception:  # noqa: BLE001 — CPU Spaces / local runs simply skip this
+    spaces = None  # type: ignore[assignment]
+
 import asyncio
 import logging
 from contextlib import asynccontextmanager, suppress
@@ -94,5 +109,27 @@ def create_app() -> FastAPI:
 
 app = create_app()
 
+
+def _report_zerogpu_startup() -> None:
+    """Send ZeroGPU's startup report by hand.
+
+    `spaces` normally hooks the report into ``gradio.Blocks.launch()``, but we
+    serve through FastAPI + uvicorn and never call ``launch()`` — so without
+    this, ZeroGPU never learns about our @spaces.GPU shim and kills us anyway.
+    A no-op everywhere except ZeroGPU Spaces.
+    """
+    try:
+        from spaces import zero
+
+        startup = getattr(zero, "startup", None)
+        if callable(startup):
+            startup()
+            cache = getattr(getattr(zero, "decorator", None), "decorated_cache", {})
+            log.info("ZeroGPU startup report sent (%d GPU function(s) registered)", len(cache))
+    except Exception:  # noqa: BLE001 — a failed report must never kill the bot
+        log.debug("ZeroGPU startup report skipped", exc_info=True)
+
+
 if __name__ == "__main__":
+    _report_zerogpu_startup()
     uvicorn.run(app, host="0.0.0.0", port=settings.port, log_level="info")

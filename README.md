@@ -93,6 +93,13 @@ bar, speed and ETA.
 
 > The public URL is auto-derived from `SPACE_ID`; set `PUBLIC_BASE_URL` only if you use a custom domain.
 
+> **ZeroGPU note:** if your Space runs on ZeroGPU hardware, Hugging Face normally
+> refuses to start CPU-only apps (*“No @spaces.GPU function detected during
+> startup”*). This repo handles that automatically: `app.py` registers a no-op
+> `@spaces.GPU` shim and sends the ZeroGPU startup report explicitly (needed
+> because serving goes through FastAPI/uvicorn, not `Blocks.launch()`). CPU
+> Basic remains the ideal hardware for a 24/7 bot if your account offers it.
+
 ### Option B — Docker (any VPS)
 
 ```bash
