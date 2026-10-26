@@ -90,7 +90,8 @@ class Settings:
         default_factory=lambda: os.getenv("SECRET_KEY", "dev-secret-change-me").strip()
     )
     public_base_url: str = field(default_factory=derive_public_url)
-    initial_proxy: str = field(default_factory=lambda: os.getenv("PROXY", "").strip())
+    initial_proxy: str = field(
+        default_factory=lambda: (os.getenv("PROXY", "") or os.getenv("WARP_PROXY", "")).strip())
 
     # Storage — on HF Spaces the repo dir is writable; DATA_DIR lets Docker
     # users point at a mounted volume instead.

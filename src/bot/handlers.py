@@ -40,6 +40,7 @@ from ..proxy import ProxyParseError
 from ..recognize import RecognizedTrack, recognize_file
 from ..runtime import Runtime
 from . import keyboards as kb
+from .profile import reset_bot_profile
 from .state import DownloadGate, SearchStore, TokenRegistry, progress_bar, spinner_frame, uptime_text
 
 log = logging.getLogger("musicbot.handlers")
@@ -284,6 +285,18 @@ async def cmd_admin(message: Message) -> None:
         await message.answer(t(lang, "admin_no_url"))
         return
     await message.answer(t(lang, "admin_panel_text"), reply_markup=markup)
+
+
+@router.message(Command("resetprofile"))
+async def cmd_resetprofile(message: Message, bot: Bot) -> None:
+    """Admin shortcut for the panel's Reset: re-brand name/descriptions/commands."""
+    assert message.from_user
+    lang, _ = await _lang(message.from_user.id, message.from_user.language_code)
+    if not Deps.settings.is_admin(message.from_user.id):
+        await message.answer(t(lang, "admin_only"))
+        return
+    await reset_bot_profile(bot)
+    await message.answer(t(lang, "profile_reset_done"))
 
 
 @router.message(Command("setproxy"))

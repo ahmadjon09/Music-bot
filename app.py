@@ -62,6 +62,9 @@ def create_app() -> FastAPI:
     db = Database(settings.db_path)
     runtime = Runtime(settings=settings, db=db)
     downloader = Downloader(settings)
+    # The Bot is created inside lifespan, but the Admin API (built below)
+    # needs it for the profile Reset button — a one-slot mailbox solves that.
+    bot_state: dict = {"bot": None}
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -73,6 +76,7 @@ def create_app() -> FastAPI:
         bot = dp = polling_task = None
         if settings.token_looks_valid:
             bot = build_bot(settings)
+            bot_state["bot"] = bot
             dp = build_dispatcher(settings, db, runtime, downloader)
             try:
                 me = await bot.get_me()
@@ -95,6 +99,7 @@ def create_app() -> FastAPI:
                 with suppress(asyncio.CancelledError, Exception):
                     await polling_task
             if bot is not None:
+                bot_state["bot"] = None
                 with suppress(Exception):
                     await bot.session.close()
             await db.close()
@@ -102,7 +107,8 @@ def create_app() -> FastAPI:
     # No public API docs either — /docs would list every admin endpoint.
     app = FastAPI(title="Music Bot", lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
-    app.include_router(build_admin_router(settings, db, runtime))
+    app.include_router(build_admin_router(
+        settings, db, runtime, bot_getter=lambda: bot_state["bot"]))
 
     # Gradio's mounted sub-app would otherwise serve its own API schema at
     # /openapi.json — shadow those paths so literally nothing is discoverable.

@@ -100,6 +100,10 @@ bar, speed and ETA.
 > `@spaces.GPU` shim and sends the ZeroGPU startup report explicitly (needed
 > because serving goes through FastAPI/uvicorn, not `Blocks.launch()`). CPU
 > Basic remains the ideal hardware for a 24/7 bot if your account offers it.
+>
+> **Keep-alive tip:** free Spaces sleep when idle. Point a free uptime monitor
+> (e.g. UptimeRobot, 5-minute interval) at `https://<your-space>.hf.space/health`
+> to keep the bot awake — the endpoint answers `{"ok": true, ...}`.
 
 ### Option B — Docker (any VPS)
 
@@ -162,6 +166,31 @@ socks5://username:password@host:port
 Example: `silver.ciaude.co.uk:8080:myuser:mypass` → `http://myuser:mypass@silver.ciaude.co.uk:8080`.
 Passwords are always masked ( `•••` ) in the admin panel and logs.
 
+### 🌀 Cloudflare WARP on a VPS (recommended against YouTube blocks)
+
+YouTube flags most datacenter IPs (*"Sign in to confirm you're not a bot"*).
+Cloudflare WARP in **proxy mode** gives yt-dlp a Cloudflare exit IP through a
+local SOCKS5 endpoint — no full-tunnel VPN, SSH and system routes untouched.
+
+**Native (Debian/Ubuntu):**
+
+```bash
+sudo bash scripts/install_warp.sh     # installs + registers + proxy mode @40000
+# then either .env:  WARP_PROXY=socks5://127.0.0.1:40000
+# or Admin Mini App → Proxy pool → "🌀 Use WARP (local)" → Test → Apply
+```
+
+**Docker:** a ready-made sidecar ([caomingjun/warp](https://github.com/cmj2002/warp-docker)):
+
+```bash
+docker compose --profile warp up -d   # starts bot + warp
+# .env:  PROXY=socks5://warp:1080
+```
+
+> WARP needs `NET_ADMIN`/TUN, so it cannot run *inside* a Hugging Face Space.
+> On HF, keep using cookies + a regular proxy (and the built-in player-client
+> fallbacks); on your own VPS, WARP is the reliable route.
+
 ## 🍪 Cookies
 
 Export a Netscape-format `cookies.txt` from your browser (e.g. with the
@@ -181,8 +210,19 @@ Telegram `initData`, verified server-side with HMAC-SHA256 (`WebAppData` key)
 plus an `ADMIN_IDS` check and a 24 h freshness window.
 
 From the panel you can: view stats & recent downloads, **test and apply proxies
-live**, install/remove global cookies, toggle maintenance mode, and clear the
-file-id cache (with hit statistics) or temp files — all without a single restart.
+live**, install/remove global cookies, toggle maintenance mode, clear the
+file-id cache (with hit statistics) or temp files — and **♻️ reset the bot's
+public identity** (name, descriptions, command menu in every language) —
+all without a single restart.
+
+### 🤖 Bot identity, auto-applied
+
+No BotFather trips needed: on every startup the bot sets its **name**,
+**description** ("What can this bot do?"), **short description** and the
+**"/" command menu** via `setMyName` / `setMyDescription` /
+`setMyShortDescription` / `setMyCommands` — localized for default + en + uz +
+ru (Telegram limits: 64 / 512 / 120 chars). The panel's *Bot profile* card (or
+`/resetprofile`) wipes all localized values and re-applies them from scratch.
 
 ## ⚙️ Configuration
 

@@ -7,3 +7,29 @@ services:
       - "7860:7860"
     volumes:
       - ./data:/data
+
+  # Optional: Cloudflare WARP sidecar — gives yt-dlp a Cloudflare exit IP so
+  # YouTube stops flagging your VPS ("Sign in to confirm you're not a bot").
+  #   docker compose --profile warp up -d
+  # then set PROXY=socks5://warp:1080 in .env (or apply it in the Admin panel).
+  warp:
+    image: caomingjun/warp:latest
+    container_name: warp
+    restart: unless-stopped
+    profiles: ["warp"]
+    device_cgroup_rules:
+      - "c 10:200 rwm"
+    ports:
+      - "127.0.0.1:1080:1080"
+    environment:
+      - WARP_SLEEP=2
+      # - WARP_LICENSE_KEY=   # optional WARP+ key
+    cap_add:
+      - MKNOD
+      - AUDIT_WRITE
+      - NET_ADMIN
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+      - net.ipv4.conf.all.src_valid_mark=1
+    volumes:
+      - ./warp-data:/var/lib/cloudflare-warp

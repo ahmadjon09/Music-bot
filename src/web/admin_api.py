@@ -18,7 +18,12 @@ from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from collections.abc import Callable
+
+from aiogram import Bot
+
 from .. import __version__, security
+from ..bot.profile import apply_bot_profile, get_bot_profile, reset_bot_profile
 from ..bot.state import BOT_STARTED_AT, uptime_text
 from ..config import Settings, resolve_ffmpeg
 from ..db import Database
@@ -41,7 +46,8 @@ class MaintenanceBody(BaseModel):
     enabled: bool
 
 
-def build_admin_router(settings: Settings, db: Database, runtime: Runtime) -> APIRouter:
+def build_admin_router(settings: Settings, db: Database, runtime: Runtime,
+                       bot_getter: Callable[[], Bot | None] | None = None) -> APIRouter:
     router = APIRouter()
 
     async def require_admin(
@@ -59,7 +65,8 @@ def build_admin_router(settings: Settings, db: Database, runtime: Runtime) -> AP
     async def admin_page() -> FileResponse:
         return FileResponse(_STATIC / "admin.html", media_type="text/html")
 
-    @router.get("/health", include_in_schema=False)
+    # Ping monitors (UptimeRobot & co.) often probe with HEAD — accept both.
+    @router.api_route("/health", methods=["GET", "HEAD"], include_in_schema=False)
     async def health() -> dict:
         return {"ok": True, "version": __version__, "uptime": uptime_text()}
 
@@ -164,6 +171,26 @@ def build_admin_router(settings: Settings, db: Database, runtime: Runtime) -> AP
     async def clear_cache(_: int = Depends(require_admin)) -> dict:
         removed = await db.cache_clear()
         return {"ok": True, "removed": removed}
+
+    # ── bot identity: name / descriptions / commands ─────────────────────────
+    def _bot_or_503() -> Bot:
+        bot = bot_getter() if bot_getter else None
+        if bot is None:
+            raise HTTPException(status_code=503, detail="Bot is not running (no BOT_TOKEN?)")
+        return bot
+
+    @router.get("/api/admin/profile")
+    async def profile(_: int = Depends(require_admin)) -> dict:
+        return {"ok": True, "profile": await get_bot_profile(_bot_or_503())}
+
+    @router.post("/api/admin/profile/apply")
+    async def profile_apply(_: int = Depends(require_admin)) -> dict:
+        return {"ok": True, "applied": await apply_bot_profile(_bot_or_503())}
+
+    @router.post("/api/admin/profile/reset")
+    async def profile_reset(_: int = Depends(require_admin)) -> dict:
+        """Wipe every localized name/description/command, then re-apply fresh."""
+        return {"ok": True, **(await reset_bot_profile(_bot_or_503()))}
 
     @router.post("/api/admin/clear-tmp")
     async def clear_tmp(_: int = Depends(require_admin)) -> dict:

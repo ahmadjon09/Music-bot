@@ -66,6 +66,7 @@
     <button id="btnProxySave">💾 Apply now</button>
     <button class="ghost" id="btnProxyTest">🧪 Test first</button>
     <button class="danger" id="btnProxyClear">Remove</button>
+    <button class="ghost" id="btnWarpFill">🌀 Use WARP (local)</button>
   </div>
   <div class="hint" id="proxyCurrent"></div>
 </div>
@@ -80,6 +81,19 @@
     <button class="danger" id="btnCookiesClear">Remove</button>
   </div>
   <div class="hint" id="cookiesInfo">Stored encrypted (Fernet). Used for every download; users' personal cookies take precedence.</div>
+</div>
+
+<div class="card">
+  <h2>🤖 Bot profile &amp; commands</h2>
+  <div class="hint">Name, descriptions and the "/" menu are auto-applied in
+    <b>default + en + uz + ru</b> on every startup. Reset wipes all localized
+    values on Telegram's side and re-applies them from scratch.</div>
+  <pre id="profileView" style="white-space:pre-wrap;font-size:12px;opacity:.85;margin:10px 0">loading…</pre>
+  <div class="row">
+    <button class="ghost" id="btnProfileApply">✅ Re-apply</button>
+    <button class="danger" id="btnProfileReset">♻️ Reset &amp; re-apply</button>
+    <button class="ghost" id="btnProfileRefresh">🔄 View current</button>
+  </div>
 </div>
 
 <div class="card">
@@ -174,7 +188,31 @@ $("maintenanceToggle").onchange = async (ev)=>{ try{ await api("/api/admin/maint
 $("btnClearCache").onclick = async ()=>{ try{ const r=await api("/api/admin/clear-cache",{method:"POST"}); toast(`🗄 Removed ${r.removed} cached entries`); load(); }catch(e){ toast("❌ "+e.message);} };
 $("btnClearTmp").onclick   = async ()=>{ try{ await api("/api/admin/clear-tmp",{method:"POST"}); toast("🧹 Temp wiped"); load(); }catch(e){ toast("❌ "+e.message);} };
 
-load();
+async function loadProfile(){
+  try{
+    const r = await api("/api/admin/profile");
+    const lines = [];
+    for(const [lang, p] of Object.entries(r.profile||{})){
+      lines.push(`🌐 ${lang}: ${p.name||"—"}`);
+      lines.push(`   short: ${(p.short_description||"—").slice(0,80)}`);
+      lines.push(`   cmds: ${(p.commands||[]).join(" ")}`);
+    }
+    $("profileView").textContent = lines.join("\n") || "—";
+  }catch(e){ $("profileView").textContent = "⚠️ " + e.message; }
+}
+$("btnProfileRefresh").onclick = loadProfile;
+$("btnProfileApply").onclick = async (ev)=>{ const b=ev.target; b.disabled=true;
+  try{ await api("/api/admin/profile/apply",{method:"POST"}); toast("✅ Profile re-applied"); loadProfile(); }
+  catch(e){ toast("❌ "+e.message); } finally{ b.disabled=false; } };
+$("btnProfileReset").onclick = async (ev)=>{
+  if(!confirm("Wipe ALL bot names/descriptions/commands on Telegram and re-apply from scratch?")) return;
+  const b=ev.target; b.disabled=true; b.innerHTML='<span class="spin">⏳</span> Resetting…';
+  try{ await api("/api/admin/profile/reset",{method:"POST"}); toast("♻️ Profile reset & re-applied"); loadProfile(); }
+  catch(e){ toast("❌ "+e.message); } finally{ b.disabled=false; b.textContent="♻️ Reset & re-apply"; } };
+$("btnWarpFill").onclick = ()=>{ $("proxyInput").value = "socks5://127.0.0.1:40000";
+  toast("🌀 WARP local proxy filled — test it, then Apply (VPS only)"); };
+
+load(); loadProfile();
 </script>
 </body>
 </html>
