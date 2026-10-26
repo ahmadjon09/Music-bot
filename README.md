@@ -49,7 +49,7 @@ re-architected as a modular, fully-async aiogram 3 application.
 ┌────────────────────────── single process · port 7860 ──────────────────────────┐
 │  app.py — FastAPI + Gradio (mount) + aiogram polling (background task)         │
 │                                                                                 │
-│  GET /            Gradio public status page (read-only)                         │
+│  GET /            bare “In deployment” placeholder (nothing public)            │
 │  GET /admin       Telegram Mini App  ── initData HMAC ──► /api/admin/*          │
 │  GET /health      liveness probe                                                │
 │                                                                                 │

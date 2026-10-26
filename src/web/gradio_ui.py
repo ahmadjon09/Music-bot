@@ -1,50 +1,26 @@
-"""Public status page (Gradio) — what visitors of the Space see.
+"""Public landing page (Gradio) — deliberately content-free.
 
-Deliberately read-only: all the sharp tools live in the Telegram Mini App,
-which only admins can open. This page just proves the bot is alive.
+Visitors of the Space see a single line and nothing else: no stats, no
+buttons, no version numbers. Everything interesting (the bot itself and the
+admin Mini App) lives inside Telegram, away from curious eyes.
 """
 
 from __future__ import annotations
 
 import gradio as gr
 
-from .. import __version__
-from ..bot.state import uptime_text
-from ..config import Settings
-from ..db import Database
-from ..downloader import ytdlp_version
-from ..runtime import Runtime
+# Hide Gradio's own footer too — bare page, bare minimum.
+_CSS = "footer { display: none !important; } .gradio-container { max-width: 100% !important; }"
+
+_PAGE = (
+    '<div style="display:flex; align-items:center; justify-content:center; '
+    'min-height:70vh; font-family:system-ui, sans-serif;">'
+    '<div style="font-size:2.2rem; font-weight:700; letter-spacing:.02em;">'
+    "In deployment</div></div>"
+)
 
 
-def build_gradio(settings: Settings, db: Database, runtime: Runtime) -> gr.Blocks:
-    async def refresh() -> tuple[str, str, str, str, str]:
-        stats = await db.stats()
-        bot_state = "🟢 online" if settings.token_looks_valid else "🔴 BOT_TOKEN not set"
-        return (
-            bot_state,
-            uptime_text(),
-            f"{stats['users']} users · {stats['downloads']} downloads · {stats['cached']} cached files",
-            f"yt-dlp {ytdlp_version()} · bot v{__version__}",
-            "🔐 " + (runtime.proxy_label() if False else "Admin settings are private"),
-        )
-
-    with gr.Blocks(title="Music Bot — status", theme=gr.themes.Soft()) as demo:
-        gr.Markdown(
-            "# 🎧 Music Bot\n"
-            "A blazing-fast Telegram media downloader: **YouTube · TikTok · Instagram · X · "
-            "Pinterest** and 1000+ more sites, song search, and Shazam-powered music recognition.\n\n"
-            "👉 Open the bot in Telegram and just send a link, a song name — or a video."
-        )
-        status = gr.Textbox(label="Bot", interactive=False)
-        uptime = gr.Textbox(label="Uptime", interactive=False)
-        counters = gr.Textbox(label="Counters", interactive=False)
-        versions = gr.Textbox(label="Versions", interactive=False)
-        note = gr.Textbox(label="Admin", interactive=False)
-        refresh_btn = gr.Button("🔄 Refresh", variant="primary")
-        refresh_btn.click(refresh, outputs=[status, uptime, counters, versions, note])
-        demo.load(refresh, outputs=[status, uptime, counters, versions, note])
-        gr.Markdown(
-            "<small>Administration happens inside Telegram via the secure Mini App "
-            "(admins only, verified with Telegram initData).</small>"
-        )
+def build_gradio() -> gr.Blocks:
+    with gr.Blocks(title="In deployment", css=_CSS) as demo:
+        gr.HTML(_PAGE)
     return demo

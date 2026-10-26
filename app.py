@@ -2,7 +2,7 @@
 
 Layout of the single process:
   * FastAPI app
-      ├─ GET  /            → Gradio status page (public, read-only)
+      ├─ GET  /            → bare "In deployment" placeholder (no info, no UI)
       ├─ GET  /admin       → Telegram Mini App (admins only, initData-verified)
       ├─ /api/admin/*      → live proxy/cookies/stats control
       └─ GET  /health      → liveness probe
@@ -99,10 +99,22 @@ def create_app() -> FastAPI:
                     await bot.session.close()
             await db.close()
 
-    app = FastAPI(title="Music Bot", lifespan=lifespan)
+    # No public API docs either — /docs would list every admin endpoint.
+    app = FastAPI(title="Music Bot", lifespan=lifespan,
+                  docs_url=None, redoc_url=None, openapi_url=None)
     app.include_router(build_admin_router(settings, db, runtime))
 
-    demo = build_gradio(settings, db, runtime)
+    # Gradio's mounted sub-app would otherwise serve its own API schema at
+    # /openapi.json — shadow those paths so literally nothing is discoverable.
+    from fastapi import HTTPException
+
+    @app.get("/openapi.json", include_in_schema=False)
+    @app.get("/docs", include_in_schema=False)
+    @app.get("/redoc", include_in_schema=False)
+    async def _gone() -> None:
+        raise HTTPException(status_code=404)
+
+    demo = build_gradio()  # public page: a bare "In deployment" placeholder
     app = gr.mount_gradio_app(app, demo, path="/")
     return app
 
