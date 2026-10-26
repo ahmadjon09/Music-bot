@@ -33,3 +33,19 @@ services:
       - net.ipv4.conf.all.src_valid_mark=1
     volumes:
       - ./warp-data:/var/lib/cloudflare-warp
+
+  # Optional: self-hosted Cobalt — one-POST downloads for Instagram/TikTok/X/…
+  #   docker compose --profile cobalt up -d
+  # then set COBALT_API_URL=http://cobalt:9000 in .env
+  cobalt:
+    image: ghcr.io/imputnet/cobalt:11
+    container_name: cobalt
+    restart: unless-stopped
+    profiles: ["cobalt"]
+    environment:
+      # URL cobalt puts into its tunnel links; the bot fetches tunnels
+      # server-side, so the compose-internal address is enough.
+      - API_URL=http://cobalt:9000/
+      - API_PORT=9000
+    ports:
+      - "127.0.0.1:9000:9000"

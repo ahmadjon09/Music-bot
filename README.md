@@ -33,12 +33,14 @@ re-architected as a modular, fully-async aiogram 3 application.
 |---|---|
 | 🔗 **Universal downloader** | YouTube, TikTok, Instagram, X/Twitter, Pinterest, Bluesky, SoundCloud + everything yt-dlp & gallery-dl support |
 | 🖼 **Carousel / album support** | Multi-item posts arrive as clean Telegram albums (chunked by 10, capped at 20) |
-| 🔍 **Song search** | Type a name → **20+ results under 10 minutes**, **10 per page**, inline pagination, one-tap MP3 |
+| 🔍 **Song search** | Type a name → **20+ results under 10 minutes**, **10 per page**, inline pagination, one-tap MP3 — powered by YouTube's InnerTube API (**~0.5 s** instead of yt-dlp's 5–20 s), with a 10-minute query cache |
+| ⚡ **Cobalt fast lane** | Instagram, TikTok, X, Pinterest, Facebook, Reddit, Vimeo… fetched via [Cobalt](https://cobalt.tools) in one POST (carousels included); yt-dlp stays on YouTube & audio duty, and doubles as the automatic fallback |
+| 🤖 **Self-maintaining proxy pool** | A background worker scans the public [TheSpeedX proxy lists](https://github.com/TheSpeedX/PROXY-List) top-down, keeps only proxies that **actually reach YouTube**, ranks them by latency and re-scans every 15 min — downloads rotate through the best exits and cool down dead ones automatically, no babysitting |
 | ⚡️ **Universal file_id cache** | **Everything** the bot sends (audio, video per quality, photos, whole carousels, extracted audio, Shazam results) is remembered in SQLite by Telegram `file_id`. Any URL spelling (`youtu.be/…`, Shorts, tracking params…) canonicalises to one key, checked *before* any network call — repeat requests are re-sent from Telegram's own servers in ~0s, for every user |
 | 🎵 **Music recognition** | Send any video → the bot names the background track (Shazam, free, no API key) and offers the MP3 |
 | 🏷 **Rich metadata** | Cleaned titles, artist/title splitting, embedded cover art (ID3/MP4 tags), HQ thumbnails |
 | 🌍 **3 languages** | 🇺🇿 O'zbek · 🇷🇺 Русский · 🇬🇧 English — per-user, switchable in Settings |
-| 🌐 **Adaptive proxies** | Paste proxies in *any* vendor format; pooled, randomly rotated, changed live |
+| 🌐 **Adaptive proxies** | Paste proxies in *any* vendor format; manual pool or auto pool, rotated per attempt, changed live |
 | 🍪 **Live cookies** | Global (admin) + per-user cookies, Fernet-encrypted, swapped without restarts |
 | 🛠 **Admin Mini App** | Telegram Web App for admins only: stats, proxy test/apply, cookies, maintenance, housekeeping |
 | 🎞 **Quality prefs** | Per-user video quality (360p–1080p/Best) persisted in SQLite |
@@ -61,6 +63,9 @@ re-architected as a modular, fully-async aiogram 3 application.
 │  ├─ recognize.py    ffmpeg snippet → Shazam                                     │
 │  ├─ metadata.py     title cleanup · artist split · mutagen tags · cover art     │
 │  ├─ proxy.py        forgiving multi-format proxy parser (see below)             │
+│  ├─ proxypool.py    self-maintaining free-proxy pool (YouTube-verified)         │
+│  ├─ cobalt.py       Cobalt API client — socials fast lane                       │
+│  ├─ httputil.py     aiohttp sessions for HTTP + SOCKS proxies                   │
 │  ├─ runtime.py      live proxy pool + cookie jar (hot-swappable)                │
 │  ├─ security.py     Fernet encryption · Web App initData validation             │
 │  ├─ db.py           SQLite (users, kv, cookies, file_id cache, download log)    │
@@ -191,6 +196,46 @@ docker compose --profile warp up -d   # starts bot + warp
 > On HF, keep using cookies + a regular proxy (and the built-in player-client
 > fallbacks); on your own VPS, WARP is the reliable route.
 
+### 🤖 Autonomous free-proxy pool (on by default)
+
+Free public proxy lists refresh every few minutes and most entries are dead
+on arrival — perfect job for a robot, terrible job for a human. A background
+worker (`src/proxypool.py`):
+
+1. pulls the [TheSpeedX lists](https://github.com/TheSpeedX/PROXY-List)
+   (`http.txt`, then `socks5.txt`, then `socks4.txt`) plus a small built-in
+   bootstrap seed of previously measured proxies,
+2. probes candidates **top-to-bottom** against YouTube's `generate_204`
+   endpoint (40 in parallel) and stops as soon as the pool is full,
+3. keeps the survivors ranked by latency, persists them across restarts,
+   and re-scans every `PROXY_REFRESH_MINUTES` (default 15).
+
+Every download/search then rotates through the best exits; a proxy that
+fails is put in a 5-minute penalty box, a success clears its record. Two
+modes, switchable live in the Admin Mini App (**🤖 Auto pool / ✋ Manual**,
+plus **🔍 Rescan now**): manual pins your own proxies (WARP, paid ones),
+auto uses the robot pool and falls back to manual entries while warming up.
+Only public HTTPS download traffic ever goes through public proxies — never
+bot tokens or user data.
+
+## ⚡ Cobalt fast lane & InnerTube search
+
+**Social links** (Instagram, TikTok, X, Pinterest, Facebook, Reddit, Vimeo,
+Snapchat, Tumblr, Twitch clips, Bilibili…) go through
+[Cobalt](https://github.com/imputnet/cobalt) first: one POST returns direct
+or tunneled file URLs, and carousels arrive as picker items that become
+Telegram albums. Any Cobalt miss falls back to yt-dlp, then gallery-dl —
+three engines deep before we give up. yt-dlp keeps everything YouTube and
+every audio/MP3 request. Default is the public `api.cobalt.tools` instance;
+for heavier use self-host (`docker compose --profile cobalt up -d`, then
+`COBALT_API_URL=http://cobalt:9000`).
+
+**Song search** talks to YouTube's internal **InnerTube** API (ANDROID
+client) directly: a single JSON call answers in ~0.3–1 s, paginates via
+continuation tokens until 20–30 sub-10-minute songs are collected, and is
+cached per query for 10 minutes. If InnerTube ever hiccups, classic yt-dlp
+`ytsearch` quietly takes over.
+
 ## 🍪 Cookies
 
 Export a Netscape-format `cookies.txt` from your browser (e.g. with the
@@ -234,7 +279,13 @@ All configuration is environment variables (see [`.env.example`](.env.example)):
 | `ADMIN_IDS` | ✅ | Comma-separated admin user IDs |
 | `SECRET_KEY` | ✅ | Encrypts stored cookies |
 | `PUBLIC_BASE_URL` | – | Base URL for the Web App button (auto-derived on HF) |
-| `PROXY` | – | Initial proxy pool (admin panel can override live) |
+| `PROXY` | – | Initial proxy pool (admin panel can override live); setting it pins **manual** mode |
+| `AUTO_PROXY` | – | Self-maintaining free-proxy worker (default on; `0` disables) |
+| `PROXY_REFRESH_MINUTES` | – | Auto-pool rescan interval (default `15`) |
+| `PROXY_POOL_SIZE` | – | Healthy proxies to keep (default `12`) |
+| `COBALT_ENABLED` | – | Cobalt fast lane for socials (default on) |
+| `COBALT_API_URL` | – | Cobalt instance (default `https://api.cobalt.tools`) |
+| `COBALT_API_KEY` | – | Api-Key for self-hosted Cobalt, if configured |
 | `MAX_FILESIZE_MB` | – | Per-file cap (default `49`, Telegram's practical limit) |
 | `MAX_GLOBAL_DOWNLOADS` | – | Global concurrent downloads (default `3`) |
 | `SEARCH_MAX_DURATION` | – | Search filter, seconds (default `600` = 10 min) |
@@ -250,12 +301,14 @@ python -m pytest tests/ -v
 
 Covers the proxy parser (every vendor shape), title cleanup & artist splitting,
 i18n parity across all three languages, Web App HMAC validation, cookie
-encryption/validation, and media-routing logic.
+encryption/validation, media-routing logic, the auto proxy pool (ranking,
+cooldowns, scan waves), Cobalt response shapes, InnerTube parsing, and
+downloader proxy rotation.
 
 ## 🙏 Credits
 
 - Original single-file bot: [ssebastianoo/yt-dlp-telegram](https://github.com/ssebastianoo/yt-dlp-telegram)
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) · [gallery-dl](https://github.com/mikf/gallery-dl) · [aiogram](https://github.com/aiogram/aiogram) · [shazamio](https://github.com/shazamio/ShazamIO)
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) · [gallery-dl](https://github.com/mikf/gallery-dl) · [aiogram](https://github.com/aiogram/aiogram) · [shazamio](https://github.com/shazamio/ShazamIO) · [Cobalt](https://github.com/imputnet/cobalt) · [TheSpeedX/PROXY-List](https://github.com/TheSpeedX/PROXY-List)
 
 ## License
 

@@ -69,6 +69,12 @@
     <button class="ghost" id="btnWarpFill">🌀 Use WARP (local)</button>
   </div>
   <div class="hint" id="proxyCurrent"></div>
+  <div class="row" style="margin-top:12px">
+    <button class="ghost" id="btnModeAuto">🤖 Auto pool</button>
+    <button class="ghost" id="btnModeManual">✋ Manual</button>
+    <button class="ghost" id="btnPoolRefresh">🔍 Rescan now</button>
+  </div>
+  <div class="hint" id="poolInfo">Auto pool: free public proxies, YouTube-verified &amp; ranked by latency. Manual proxies (above) win in Manual mode.</div>
 </div>
 
 <div class="card">
@@ -142,8 +148,19 @@ async function load(){
     $("stMeta").innerHTML = `⏱ uptime <b>${s.uptime}</b> · yt-dlp <code>${s.ytdlp}</code> · bot <code>v${s.version}</code> · ffmpeg ${s.ffmpeg?"✅":"❌"} · tmp ${fmtBytes(s.tmp_bytes)} · ⚡ cache hits <b>${s.cache?.hits ?? 0}</b> (${s.cache?.files ?? 0} files + ${s.cache?.albums ?? 0} albums)`;
     $("maintenanceToggle").checked = !!s.maintenance;
 
-    $("proxyState").innerHTML = s.proxies?.length ? `<span class="pill ok">${s.proxies.length} active</span>` : `<span class="pill bad">direct</span>`;
-    $("proxyCurrent").innerHTML = s.proxies?.length ? s.proxies.map(p=>`<code>${p}</code>`).join("<br>") : "No proxy — direct connection.";
+    const pp = s.proxy_pool || {};
+    const autoActive = pp.mode === "auto" && pp.healthy > 0;
+    $("proxyState").innerHTML = autoActive
+      ? `<span class="pill ok">auto · ${pp.healthy} verified</span>`
+      : (s.proxies?.length ? `<span class="pill ok">${s.proxies.length} manual</span>` : `<span class="pill bad">direct</span>`);
+    $("proxyCurrent").innerHTML = s.proxies?.length ? s.proxies.map(p=>`<code>${p}</code>`).join("<br>") : "No manual proxy set.";
+    const top = (pp.top||[]).map(p=>`<code>${p.proxy}</code> ${p.ms} ms`).join(" · ");
+    $("poolInfo").innerHTML =
+      `Mode: <b>${pp.mode||"auto"}</b>${pp.auto_enabled===false?" (worker off)":""} · healthy <b>${pp.healthy??0}</b>` +
+      (pp.refreshing ? ` · <span class="spin">⏳</span> scanning…` : ``) +
+      (pp.last_refresh ? ` · refreshed ${fmtTime(pp.last_refresh)} (${pp.last_scanned} scanned)` : ` · not scanned yet`) +
+      (top ? `<br>Fastest: ${top}` : ``) +
+      (s.cobalt ? `<br>⚡ Cobalt (Instagram/TikTok/X…): ${s.cobalt.enabled ? `<code>${s.cobalt.url}</code>` : "off"}` : ``);
 
     $("cookieState").innerHTML = s.cookies.installed ? `<span class="pill ok">${s.cookies.total} cookies</span>` : `<span class="pill bad">empty jar</span>`;
     if(s.cookies.installed){
@@ -167,7 +184,11 @@ $("btnProxyTest").onclick = async (ev)=>{ const b=ev.target; b.disabled=true; b.
     toast(r.ok ? `✅ Works! Exit IP ${r.ip} · ${r.ms} ms` : "❌ "+r.error); }catch(e){ toast("❌ "+e.message); }
   finally{ b.disabled=false; b.textContent="🧪 Test first"; } };
 
-$("btnProxyClear").onclick = async ()=>{ try{ await api("/api/admin/proxy",{method:"DELETE"}); toast("✅ Proxy removed"); load(); }catch(e){ toast("❌ "+e.message);} };
+$("btnProxyClear").onclick = async ()=>{ try{ await api("/api/admin/proxy",{method:"DELETE"}); toast("✅ Proxy removed — back to auto pool"); load(); }catch(e){ toast("❌ "+e.message);} };
+
+$("btnModeAuto").onclick = async ()=>{ try{ await api("/api/admin/proxy/mode",{method:"POST",body:JSON.stringify({mode:"auto"})}); toast("🤖 Auto pool mode"); load(); }catch(e){ toast("❌ "+e.message);} };
+$("btnModeManual").onclick = async ()=>{ try{ await api("/api/admin/proxy/mode",{method:"POST",body:JSON.stringify({mode:"manual"})}); toast("✋ Manual proxy mode"); load(); }catch(e){ toast("❌ "+e.message);} };
+$("btnPoolRefresh").onclick = async ()=>{ try{ await api("/api/admin/proxy/pool/refresh",{method:"POST"}); toast("🔍 Rescan started — give it ~30 s"); setTimeout(load, 3000); }catch(e){ toast("❌ "+e.message);} };
 
 $("btnCookiesSave").onclick = async (ev)=>{ const b=ev.target; b.disabled=true;
   try{ const r=await api("/api/admin/cookies",{method:"POST",body:JSON.stringify({content:$("cookiesInput").value})});

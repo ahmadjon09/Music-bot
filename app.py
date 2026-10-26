@@ -62,6 +62,12 @@ def create_app() -> FastAPI:
     db = Database(settings.db_path)
     runtime = Runtime(settings=settings, db=db)
     downloader = Downloader(settings)
+    # Download outcomes feed the proxy pool: dead exits cool down, good
+    # ones clear their record — the rotation learns from every job.
+    downloader.proxy_reporter = (
+        lambda url, ok: runtime.report_proxy_success(url) if ok
+        else runtime.report_proxy_failure(url)
+    )
     # The Bot is created inside lifespan, but the Admin API (built below)
     # needs it for the profile Reset button — a one-slot mailbox solves that.
     bot_state: dict = {"bot": None}
@@ -72,6 +78,11 @@ def create_app() -> FastAPI:
         await runtime.load()
         log.info("runtime ready · proxies: %s · global cookies: %s",
                  runtime.proxy_label(), "yes" if runtime.has_global_cookies else "no")
+
+        # Self-maintaining free-proxy pool (TheSpeedX lists, YouTube-verified).
+        proxy_task = None
+        if settings.auto_proxy:
+            proxy_task = asyncio.create_task(runtime.run_proxy_worker(), name="proxy-pool")
 
         bot = dp = polling_task = None
         if settings.token_looks_valid:
@@ -98,6 +109,10 @@ def create_app() -> FastAPI:
                 polling_task.cancel()
                 with suppress(asyncio.CancelledError, Exception):
                     await polling_task
+            if proxy_task is not None:
+                proxy_task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await proxy_task
             if bot is not None:
                 bot_state["bot"] = None
                 with suppress(Exception):

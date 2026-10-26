@@ -13,7 +13,6 @@ import shutil
 import time
 from pathlib import Path
 
-import aiohttp
 from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -28,6 +27,7 @@ from ..bot.state import BOT_STARTED_AT, uptime_text
 from ..config import Settings, resolve_ffmpeg
 from ..db import Database
 from ..downloader import ytdlp_version
+from ..httputil import proxy_session
 from ..proxy import ProxyParseError, parse_proxy_list
 from ..runtime import Runtime
 
@@ -36,6 +36,10 @@ _STATIC = Path(__file__).resolve().parent / "static"
 
 class ProxyBody(BaseModel):
     proxies: str
+
+
+class ProxyModeBody(BaseModel):
+    mode: str  # "auto" (free pool) | "manual" (admin proxies)
 
 
 class CookiesBody(BaseModel):
@@ -94,6 +98,8 @@ def build_admin_router(settings: Settings, db: Database, runtime: Runtime,
             "maintenance": runtime.maintenance,
             "tmp_bytes": tmp_usage,
             "proxies": [p.masked for p in runtime.proxies],
+            "proxy_pool": runtime.pool_stats(),
+            "cobalt": {"enabled": settings.cobalt_enabled, "url": settings.cobalt_api_url},
             "cookies": {
                 "installed": runtime.has_global_cookies,
                 "total": cookies.get("total", 0),
@@ -116,6 +122,19 @@ def build_admin_router(settings: Settings, db: Database, runtime: Runtime,
         await runtime.clear_proxies()
         return {"ok": True}
 
+    @router.post("/api/admin/proxy/mode")
+    async def set_proxy_mode(body: ProxyModeBody, _: int = Depends(require_admin)) -> dict:
+        await runtime.set_proxy_mode(body.mode)
+        return {"ok": True, "proxy_pool": runtime.pool_stats()}
+
+    @router.post("/api/admin/proxy/pool/refresh")
+    async def refresh_pool(_: int = Depends(require_admin)) -> dict:
+        """Kick off a rescan of the free lists (runs in the background)."""
+        pool = runtime.pool
+        if pool is not None and not pool.refreshing:
+            asyncio.create_task(runtime.refresh_pool_now(), name="proxy-refresh")
+        return {"ok": True, "proxy_pool": runtime.pool_stats()}
+
     @router.post("/api/admin/proxy/test")
     async def test_proxy(body: ProxyBody, _: int = Depends(require_admin)) -> dict:
         """Try one request through the (first) candidate proxy."""
@@ -128,9 +147,8 @@ def build_admin_router(settings: Settings, db: Database, runtime: Runtime,
         proxy_url = pool[0].url
         started = time.monotonic()
         try:
-            timeout = aiohttp.ClientTimeout(total=15)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get("https://api.ipify.org?format=json", proxy=proxy_url) as resp:
+            async with proxy_session(proxy_url, timeout=15) as (session, req_proxy):
+                async with session.get("https://api.ipify.org?format=json", proxy=req_proxy) as resp:
                     data = await resp.json(content_type=None)
             return {"ok": True, "ip": data.get("ip", "?"),
                     "ms": int((time.monotonic() - started) * 1000)}
