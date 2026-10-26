@@ -33,7 +33,7 @@ re-architected as a modular, fully-async aiogram 3 application.
 | 🔗 **Universal downloader** | YouTube, TikTok, Instagram, X/Twitter, Pinterest, Bluesky, SoundCloud + everything yt-dlp & gallery-dl support |
 | 🖼 **Carousel / album support** | Multi-item posts arrive as clean Telegram albums (chunked by 10, capped at 20) |
 | 🔍 **Song search** | Type a name → **20+ results under 10 minutes**, **10 per page**, inline pagination, one-tap MP3 |
-| ⚡️ **file_id cache** | The same track requested twice is re-sent instantly — zero re-downloading |
+| ⚡️ **Universal file_id cache** | **Everything** the bot sends (audio, video per quality, photos, whole carousels, extracted audio, Shazam results) is remembered in SQLite by Telegram `file_id`. Any URL spelling (`youtu.be/…`, Shorts, tracking params…) canonicalises to one key, checked *before* any network call — repeat requests are re-sent from Telegram's own servers in ~0s, for every user |
 | 🎵 **Music recognition** | Send any video → the bot names the background track (Shazam, free, no API key) and offers the MP3 |
 | 🏷 **Rich metadata** | Cleaned titles, artist/title splitting, embedded cover art (ID3/MP4 tags), HQ thumbnails |
 | 🌍 **3 languages** | 🇺🇿 O'zbek · 🇷🇺 Русский · 🇬🇧 English — per-user, switchable in Settings |
@@ -68,10 +68,15 @@ re-architected as a modular, fully-async aiogram 3 application.
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Download pipeline (the fast path):** probe URL → check `file_id` cache →
-yt-dlp in a worker thread (native M4A/MP3 preferred — no re-encode; ffmpeg only
-as a last resort) → tag & embed cover → upload → cache the `file_id` → wipe the
-temp dir. Progress is streamed into a single edited message with an animated
+**Download pipeline (the fast path):** canonicalise URL → ⚡ **cache lookup
+before any network request** (a `media_index` remembers whether a link *is* an
+audio/video/photo/album, videos are keyed per quality) → probe → ⚡ cache lookup
+again under the resolved `extractor:id` (rescues short links like `vm.tiktok.com`)
+→ yt-dlp in a worker thread (native M4A/MP3 preferred — no re-encode; ffmpeg only
+as a last resort) → tag & embed cover → upload → store every resulting `file_id`
+(carousels as one ordered JSON payload) under *all* canonical spellings → wipe
+the temp dir. Stale `file_id`s evict themselves and fall back to a fresh
+download. Progress is streamed into a single edited message with an animated
 bar, speed and ETA.
 
 ## 🚀 Quick start
@@ -169,7 +174,7 @@ plus an `ADMIN_IDS` check and a 24 h freshness window.
 
 From the panel you can: view stats & recent downloads, **test and apply proxies
 live**, install/remove global cookies, toggle maintenance mode, and clear the
-file-id cache or temp files — all without a single restart.
+file-id cache (with hit statistics) or temp files — all without a single restart.
 
 ## ⚙️ Configuration
 

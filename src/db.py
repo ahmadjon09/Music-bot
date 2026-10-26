@@ -4,12 +4,17 @@ Tables:
   users        — language & quality preferences
   kv           — runtime settings (global cookies (encrypted), proxy pool…)
   user_cookies — per-user encrypted cookies, inherited from the original bot
-  file_cache   — Telegram file_id cache: the single biggest speed trick here
-  downloads    — delivery log feeding the admin statistics
+  file_cache        — Telegram file_id cache: the single biggest speed trick here
+  album_cache       — ordered file_id lists for carousels (JSON payloads)
+  media_index       — canonical key → primary kind, so a default-mode lookup
+                      knows what a link IS before any network request
+  recognition_cache — Shazam results per uploaded file (file_unique_id)
+  downloads         — delivery log feeding the admin statistics
 """
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -40,6 +45,28 @@ CREATE TABLE IF NOT EXISTS file_cache (
     title     TEXT,
     performer TEXT,
     duration  INTEGER,
+    hits      INTEGER NOT NULL DEFAULT 0,
+    created   REAL NOT NULL,
+    last_used REAL NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS album_cache (
+    cache_key TEXT PRIMARY KEY,
+    payload   TEXT NOT NULL,
+    title     TEXT,
+    hits      INTEGER NOT NULL DEFAULT 0,
+    created   REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS media_index (
+    canonical    TEXT PRIMARY KEY,
+    primary_kind TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS recognition_cache (
+    file_unique_id TEXT PRIMARY KEY,
+    title     TEXT NOT NULL,
+    artist    TEXT NOT NULL,
+    album     TEXT,
+    cover_url TEXT,
+    shazam_url TEXT,
     created   REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS downloads (
@@ -64,7 +91,17 @@ class Database:
         self._conn.row_factory = aiosqlite.Row
         await self._conn.executescript(_SCHEMA)
         await self._conn.execute("PRAGMA journal_mode=WAL")  # readers don't block writers
+        await self._migrate()
         await self._conn.commit()
+
+    async def _migrate(self) -> None:
+        """Add columns introduced after v1 without breaking existing databases."""
+        async with self.conn.execute("PRAGMA table_info(file_cache)") as cur:
+            columns = {row["name"] for row in await cur.fetchall()}
+        for name, ddl in (("hits", "INTEGER NOT NULL DEFAULT 0"),
+                          ("last_used", "REAL NOT NULL DEFAULT 0")):
+            if name not in columns:
+                await self.conn.execute(f"ALTER TABLE file_cache ADD COLUMN {name} {ddl}")
 
     async def close(self) -> None:
         if self._conn:
@@ -141,26 +178,130 @@ class Database:
         await self.conn.commit()
 
     # ── Telegram file_id cache ───────────────────────────────────────────────
-    async def cache_get(self, cache_key: str) -> dict | None:
+    async def cache_get(self, cache_key: str, *, count_hit: bool = True) -> dict | None:
         async with self.conn.execute(
             "SELECT * FROM file_cache WHERE cache_key = ?", (cache_key,)
         ) as cur:
             row = await cur.fetchone()
+        if row and count_hit:
+            await self.conn.execute(
+                "UPDATE file_cache SET hits = hits + 1, last_used = ? WHERE cache_key = ?",
+                (time.time(), cache_key),
+            )
+            await self.conn.commit()
         return dict(row) if row else None
 
     async def cache_put(self, cache_key: str, file_id: str, kind: str,
                         title: str = "", performer: str = "", duration: int = 0) -> None:
+        now = time.time()
         await self.conn.execute(
-            "INSERT OR REPLACE INTO file_cache "
-            "(cache_key, file_id, kind, title, performer, duration, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (cache_key, file_id, kind, title, performer, duration, time.time()),
+            "INSERT INTO file_cache "
+            "(cache_key, file_id, kind, title, performer, duration, hits, created, last_used) "
+            "VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?) "
+            "ON CONFLICT(cache_key) DO UPDATE SET file_id = excluded.file_id, "
+            "title = excluded.title, performer = excluded.performer, "
+            "duration = excluded.duration, last_used = excluded.last_used",
+            (cache_key, file_id, kind, title, performer, duration, now, now),
+        )
+        await self.conn.commit()
+
+    async def cache_delete(self, cache_key: str) -> None:
+        await self.conn.execute("DELETE FROM file_cache WHERE cache_key = ?", (cache_key,))
+        await self.conn.commit()
+
+    # ── carousel / album cache ───────────────────────────────────────────────
+    async def album_get(self, cache_key: str, *, count_hit: bool = True) -> list[dict] | None:
+        async with self.conn.execute(
+            "SELECT payload FROM album_cache WHERE cache_key = ?", (cache_key,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        if count_hit:
+            await self.conn.execute(
+                "UPDATE album_cache SET hits = hits + 1 WHERE cache_key = ?", (cache_key,)
+            )
+            await self.conn.commit()
+        try:
+            items = json.loads(row["payload"])
+        except (ValueError, TypeError):
+            return None
+        return items if isinstance(items, list) and items else None
+
+    async def album_put(self, cache_key: str, items: list[dict], title: str = "") -> None:
+        if not items:
+            return
+        await self.conn.execute(
+            "INSERT OR REPLACE INTO album_cache (cache_key, payload, title, hits, created) "
+            "VALUES (?, ?, ?, 0, ?)",
+            (cache_key, json.dumps(items), title, time.time()),
+        )
+        await self.conn.commit()
+
+    async def album_delete(self, cache_key: str) -> None:
+        await self.conn.execute("DELETE FROM album_cache WHERE cache_key = ?", (cache_key,))
+        await self.conn.commit()
+
+    # ── media index: what IS this link, primarily? ───────────────────────────
+    async def index_get(self, canonical: str) -> str | None:
+        async with self.conn.execute(
+            "SELECT primary_kind FROM media_index WHERE canonical = ?", (canonical,)
+        ) as cur:
+            row = await cur.fetchone()
+        return row["primary_kind"] if row else None
+
+    async def index_put(self, canonical: str, primary_kind: str) -> None:
+        await self.conn.execute(
+            "INSERT OR REPLACE INTO media_index (canonical, primary_kind) VALUES (?, ?)",
+            (canonical, primary_kind),
+        )
+        await self.conn.commit()
+
+    # ── recognition cache ────────────────────────────────────────────────────
+    async def recognition_get(self, file_unique_id: str) -> dict | None:
+        async with self.conn.execute(
+            "SELECT * FROM recognition_cache WHERE file_unique_id = ?", (file_unique_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def recognition_put(self, file_unique_id: str, *, title: str, artist: str,
+                              album: str = "", cover_url: str | None = None,
+                              shazam_url: str | None = None) -> None:
+        await self.conn.execute(
+            "INSERT OR REPLACE INTO recognition_cache "
+            "(file_unique_id, title, artist, album, cover_url, shazam_url, created) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (file_unique_id, title, artist, album, cover_url, shazam_url, time.time()),
         )
         await self.conn.commit()
 
     async def cache_clear(self) -> int:
-        cur = await self.conn.execute("DELETE FROM file_cache")
+        total = 0
+        for table in ("file_cache", "album_cache", "media_index", "recognition_cache"):
+            cur = await self.conn.execute(f"DELETE FROM {table}")  # noqa: S608 — fixed names
+            total += cur.rowcount
         await self.conn.commit()
-        return cur.rowcount
+        return total
+
+    async def cache_stats(self) -> dict:
+        """Cache size & popularity for the admin panel."""
+        out: dict = {"files": 0, "albums": 0, "hits": 0, "by_kind": {}}
+        async with self.conn.execute(
+            "SELECT kind, COUNT(*) AS c, COALESCE(SUM(hits), 0) AS h FROM file_cache GROUP BY kind"
+        ) as cur:
+            for row in await cur.fetchall():
+                out["by_kind"][row["kind"]] = int(row["c"])
+                out["files"] += int(row["c"])
+                out["hits"] += int(row["h"])
+        async with self.conn.execute(
+            "SELECT COUNT(*) AS c, COALESCE(SUM(hits), 0) AS h FROM album_cache"
+        ) as cur:
+            row = await cur.fetchone()
+        if row:
+            out["albums"] = int(row["c"])
+            out["hits"] += int(row["h"])
+        return out
 
     # ── download log & stats ─────────────────────────────────────────────────
     async def log_download(self, user_id: int, url: str, kind: str,
@@ -176,7 +317,7 @@ class Database:
         for name, query in (
             ("users", "SELECT COUNT(*) AS c FROM users"),
             ("downloads", "SELECT COUNT(*) AS c FROM downloads WHERE status = 'ok'"),
-            ("cached", "SELECT COUNT(*) AS c FROM file_cache"),
+            ("cached", "SELECT (SELECT COUNT(*) FROM file_cache) + (SELECT COUNT(*) FROM album_cache) AS c"),
         ):
             async with self.conn.execute(query) as cur:
                 row = await cur.fetchone()
