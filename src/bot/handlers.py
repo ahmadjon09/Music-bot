@@ -35,7 +35,7 @@ from ..db import Database
 from ..downloader import Downloader, MediaError, Progress, ytdlp_version
 from ..gallery import fetch_gallery
 from ..i18n import LANGS, normalize_lang, t
-from ..metadata import audio_duration, fmt_duration, prepare_cover, tag_audio
+from ..metadata import audio_duration, fmt_duration, media_filename, prepare_cover, tag_audio
 from ..proxy import ProxyParseError
 from ..recognize import RecognizedTrack, recognize_file
 from ..runtime import Runtime
@@ -505,7 +505,10 @@ async def deliver_audio(message: Message, downloaded, job: Path, *, lang: str,
         thumb = FSInputFile(str(thumb_path))
     await status.set("uploading")
     sent = await message.answer_audio(
-        FSInputFile(str(downloaded.path)), title=downloaded.title[:64],
+        FSInputFile(str(downloaded.path),
+                    filename=media_filename(downloaded.title, downloaded.performer,
+                                            downloaded.path.suffix)),
+        title=downloaded.title[:64],
         performer=(downloaded.performer or "")[:64] or None,
         duration=duration or None, thumbnail=thumb)
     if sent.audio:  # ⚡️ remember it under every spelling of this media
@@ -524,7 +527,10 @@ async def deliver_video(message: Message, downloaded, job: Path, *, lang: str,
     thumb = await _thumb_file(downloaded.thumbnail_url, job, proxy)
     token = Deps.tokens.put(url)
     sent = await message.answer_video(
-        FSInputFile(str(downloaded.path)), duration=downloaded.duration or None,
+        FSInputFile(str(downloaded.path),
+                    filename=media_filename(downloaded.title, downloaded.performer,
+                                            downloaded.path.suffix)),
+        duration=downloaded.duration or None,
         width=downloaded.width or None, height=downloaded.height or None,
         thumbnail=thumb, supports_streaming=True,
         caption=f"🎬 <b>{_esc(downloaded.title)}</b>",

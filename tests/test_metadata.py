@@ -1,4 +1,4 @@
-from src.metadata import clean_title, split_artist_title
+from src.metadata import clean_title, media_filename, split_artist_title
 
 
 def test_clean_title_strips_youtube_noise():
@@ -29,3 +29,22 @@ def test_split_falls_back_to_uploader():
         {"title": "Some Song", "uploader": "Cool Artist - Topic"})
     assert performer == "Cool Artist"
     assert title == "Some Song"
+
+
+def test_clean_title_strips_unbracketed_tails():
+    assert clean_title("The Weeknd - Blinding Lights Official Music Video") == "The Weeknd - Blinding Lights"
+    assert clean_title("Song (Official Video) HD") == "Song"
+    assert clean_title("Song (Official MV) 4K") == "Song"
+    assert clean_title("Qoshiq Music Video") == "Qoshiq"
+    assert clean_title("Video") == "Video"  # a real one-word title survives
+
+
+def test_clean_title_strips_premiere_shouts():
+    assert clean_title("Премьера клипа! Artist - Song") == "Artist - Song"
+    assert clean_title("Artist - Track [Премьера клипа, 2024]") == "Artist - Track"
+
+
+def test_media_filename_is_human_friendly():
+    assert media_filename("Never Gonna Give You Up", "Rick Astley", "m4a") == "Rick Astley - Never Gonna Give You Up.m4a"
+    assert media_filename("Song: Part 2?", "A/B", ".MP3") == "A B - Song Part 2.mp3"
+    assert media_filename("Solo", "Unknown artist", "webm") == "Solo.webm"

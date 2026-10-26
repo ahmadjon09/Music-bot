@@ -14,6 +14,7 @@ Speed tricks used here:
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -58,6 +59,14 @@ class RateLimitedError(MediaError):
     i18n_key = "error_ratelimit"
 
 
+class BotCheckError(MediaError):
+    i18n_key = "error_botcheck"
+
+
+class FormatUnavailableError(MediaError):
+    i18n_key = "error_format"
+
+
 class UnsupportedError(MediaError):
     i18n_key = "unsupported"
 
@@ -73,11 +82,57 @@ def classify_error(exc: Exception) -> MediaError:
         return AgeRestrictedError(str(exc))
     if "private" in text or "members-only" in text or "join this channel" in text:
         return PrivateContentError(str(exc))
-    if any(s in text for s in ("429", "too many requests", "rate-limit", "rate limit", "sign in to confirm", "login required", "requiring login")):
+    if "sign in to confirm" in text or "not a bot" in text:
+        return BotCheckError(str(exc))
+    if any(s in text for s in ("requested format is not available", "only images are available",
+                                "no formats", "requested format not available")):
+        return FormatUnavailableError(str(exc))
+    if any(s in text for s in ("429", "too many requests", "rate-limit", "rate limit", "login required", "requiring login")):
         return RateLimitedError(str(exc))
     if any(s in text for s in ("unavailable", "isn't available", "no video", "not found", "removed", "404", "unsupported url")):
         return UnavailableError(str(exc))
     return MediaError(str(exc))
+
+
+# ── YouTube client fallbacks ─────────────────────────────────────────────────
+# Datacenter IPs (Hugging Face included) regularly get YouTube's bot-check
+# ("Sign in to confirm you're not a bot") or a format list with no playable
+# URLs. Other player clients often sail through where the web client fails,
+# so extraction/downloads retry through them before giving up.
+_YOUTUBE_HINTS = ("youtube.com", "youtu.be", "youtube-nocookie.com", "ytsearch")
+
+
+def _is_youtube_url(url: str) -> bool:
+    low = (url or "").lower()
+    return any(hint in low for hint in _YOUTUBE_HINTS)
+
+
+def _client_variants(url: str) -> list[tuple[dict, bool]]:
+    """(param overrides, drop cookies?) attempts, mildest first."""
+    variants: list[tuple[dict, bool]] = [({}, False)]
+    if _is_youtube_url(url):
+        for client in ("android_vr", "ios"):
+            # These clients don't need (and partly ignore) cookies; dropping
+            # them also sidesteps account-bound format restrictions.
+            variants.append(({"extractor_args": {"youtube": {"player_client": [client]}}}, True))
+    return variants
+
+
+def _is_retryable(exc: MediaError) -> bool:
+    return isinstance(exc, (BotCheckError, FormatUnavailableError))
+
+
+def _looks_unusable(info: dict) -> bool:
+    """True when yt-dlp answered but left us nothing playable (SABR/PO-token)."""
+    if info.get("entries"):
+        return False
+    formats = info.get("formats") or []
+    if formats:
+        return not any(
+            f.get("url") and (f.get("ext") or "").lower() != "mhtml"  # storyboards don't count
+            for f in formats
+        )
+    return not info.get("url")
 
 
 # ── data transfer objects ────────────────────────────────────────────────────
@@ -220,21 +275,38 @@ class Downloader:
             params["remote_components"] = {"ejs:github"}
         return params
 
+    async def _extract_with_variants(self, url: str, params: dict, *, download: bool = False) -> dict:
+        """Run yt-dlp, retrying through YouTube client fallbacks when needed."""
+        last: MediaError = UnsupportedError("yt-dlp returned nothing")
+        for overrides, drop_cookies in _client_variants(url):
+            attempt = dict(params)
+            attempt.update(overrides)
+            if drop_cookies:
+                attempt.pop("cookiefile", None)
+
+            def _run(attempt: dict = attempt) -> dict:
+                with yt_dlp.YoutubeDL(attempt) as ydl:
+                    return ydl.extract_info(url, download=download) or {}
+
+            try:
+                info = await asyncio.to_thread(_run)
+            except DownloadCancelled as exc:
+                raise TooLargeError(str(exc)) from exc
+            except DownloadError as exc:
+                last = classify_error(exc)
+                if _is_retryable(last):
+                    continue  # next player client may not hit the bot-check
+                raise last from exc
+            if info and not _looks_unusable(info):
+                return info
+            last = FormatUnavailableError("no usable formats")
+        raise last
+
     # ── extraction (no download) ─────────────────────────────────────────────
     async def extract(self, url: str, *, cookiefile=None, proxy=None) -> MediaInfo:
         params = self._base_params(cookiefile=cookiefile, proxy=proxy)
         params["extract_flat"] = "in_playlist"
-
-        def _run() -> dict:
-            with yt_dlp.YoutubeDL(params) as ydl:
-                return ydl.extract_info(url, download=False) or {}
-
-        try:
-            info = await asyncio.to_thread(_run)
-        except DownloadError as exc:
-            raise classify_error(exc) from exc
-        if not info:
-            raise UnsupportedError("yt-dlp returned nothing")
+        info = await self._extract_with_variants(url, params)
         return self._to_media_info(info, fallback_url=url)
 
     def _to_media_info(self, info: dict, fallback_url: str = "") -> MediaInfo:
@@ -275,14 +347,7 @@ class Downloader:
         params = self._base_params(cookiefile=cookiefile, proxy=proxy)
         params.update({"extract_flat": True, "noplaylist": True})
 
-        def _run() -> dict:
-            with yt_dlp.YoutubeDL(params) as ydl:
-                return ydl.extract_info(f"ytsearch{fetch}:{query}", download=False) or {}
-
-        try:
-            data = await asyncio.to_thread(_run)
-        except DownloadError as exc:
-            raise classify_error(exc) from exc
+        data = await self._extract_with_variants(f"ytsearch{fetch}:{query}", params)
 
         results: list[SearchResult] = []
         seen: set[str] = set()
@@ -334,10 +399,15 @@ class Downloader:
 
     async def download_audio(self, url: str, out_dir: Path, *, cookiefile=None, proxy=None,
                              on_progress: ProgressCallback | None = None) -> DownloadedFile:
-        """Grab the best native audio stream; convert only when truly needed."""
+        """Grab the best audio stream in whatever format the site offers.
+
+        Preference order is Telegram-native first (m4a/mp3), then literally
+        any audio the page has — exotic containers are normalised afterwards
+        instead of failing with "format is not available".
+        """
         params = self._base_params(cookiefile=cookiefile, proxy=proxy, out_dir=out_dir)
         params.update({
-            "format": "ba[ext=m4a]/ba[ext=mp3]/ba/b",
+            "format": "ba[ext=m4a]/ba[ext=mp3]/ba[ext=aac]/ba/bestaudio/b/best",
             "noplaylist": True,
             "progress_hooks": [ProgressBridge(on_progress, self.settings.max_filesize).hook],
         })
@@ -346,8 +416,8 @@ class Downloader:
         performer, title = split_artist_title(info)
 
         if path.suffix.lower() not in AUDIO_NATIVE_EXTS:
-            converted = await self._to_mp3(path)
-            if converted:
+            converted = await self._to_telegram_audio(path)
+            if converted != path:
                 path.unlink(missing_ok=True)
                 path = converted
         return DownloadedFile(
@@ -391,18 +461,7 @@ class Downloader:
 
     # ── internals ────────────────────────────────────────────────────────────
     async def _download(self, url: str, params: dict, out_dir: Path) -> dict:
-        def _run() -> dict:
-            with yt_dlp.YoutubeDL(params) as ydl:
-                return ydl.extract_info(url, download=True) or {}
-
-        try:
-            info = await asyncio.to_thread(_run)
-        except DownloadCancelled as exc:
-            raise TooLargeError(str(exc)) from exc
-        except DownloadError as exc:
-            raise classify_error(exc) from exc
-        if not info:
-            raise UnsupportedError("empty result")
+        info = await self._extract_with_variants(url, params, download=True)
         # Playlists sneaking through: take the first downloaded entry.
         if info.get("_type") == "playlist" and info.get("entries"):
             info = next((e for e in info["entries"] if e), info)
@@ -424,21 +483,56 @@ class Downloader:
             return max(candidates, key=lambda p: p.stat().st_mtime)
         raise UnsupportedError("download produced no file")
 
-    async def _to_mp3(self, src: Path) -> Path | None:
-        """Lossy last resort: transcode exotic audio to MP3 @192k via ffmpeg."""
-        if not self._ffmpeg:
-            return None
-        dst = src.with_suffix(".mp3")
+    async def _run_ffmpeg(self, args: list[str], timeout: int = 600) -> bool:
         proc = await asyncio.create_subprocess_exec(
-            self._ffmpeg, "-y", "-i", str(src), "-vn", "-b:a", "192k", str(dst),
+            self._ffmpeg, *args,
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         )
         try:
-            await asyncio.wait_for(proc.wait(), timeout=600)
+            return await asyncio.wait_for(proc.wait(), timeout=timeout) == 0
         except TimeoutError:
             proc.kill()
+            return False
+
+    async def _audio_codec(self, src: Path) -> str | None:
+        """Name of the first audio codec in a file, via ffmpeg's own report."""
+        if not self._ffmpeg:
             return None
-        return dst if dst.is_file() and dst.stat().st_size > 0 else None
+        proc = await asyncio.create_subprocess_exec(
+            self._ffmpeg, "-i", str(src),
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+        _, err = await proc.communicate()
+        match = re.search(rb"Audio: ([A-Za-z0-9_]+)", err or b"")
+        return match.group(1).decode().lower() if match else None
+
+    async def _to_telegram_audio(self, src: Path) -> Path:
+        """Normalise exotic audio into a Telegram-native container.
+
+        Telegram treats only MP3/M4A as proper audio. AAC/MP3 streams hiding
+        in odd containers are remuxed bit-for-bit (fast, lossless); anything
+        else (opus, webm, vorbis…) is transcoded to M4A/AAC, MP3 as backup.
+        Returns the original path when conversion isn't possible — better to
+        try sending *something* than to fail the whole request.
+        """
+        if not self._ffmpeg or src.suffix.lower() in AUDIO_NATIVE_EXTS:
+            return src
+        codec = await self._audio_codec(src)
+        if codec == "aac":
+            dst = src.with_suffix(".m4a")
+            if await self._run_ffmpeg(["-y", "-i", str(src), "-vn", "-c:a", "copy", str(dst)]):
+                return dst
+        if codec == "mp3":
+            dst = src.with_suffix(".mp3")
+            if await self._run_ffmpeg(["-y", "-i", str(src), "-vn", "-c:a", "copy", str(dst)]):
+                return dst
+        dst = src.with_suffix(".m4a")
+        if await self._run_ffmpeg(["-y", "-i", str(src), "-vn", "-c:a", "aac", "-b:a", "192k", str(dst)]):
+            return dst
+        dst = src.with_suffix(".mp3")
+        if await self._run_ffmpeg(["-y", "-i", str(src), "-vn", "-b:a", "192k", str(dst)]):
+            return dst
+        return src
 
 
 def ytdlp_version() -> str:
