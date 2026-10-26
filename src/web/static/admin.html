@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Music Bot — Admin</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root{
+    --bg: var(--tg-theme-bg-color, #0f1115);
+    --card: var(--tg-theme-secondary-bg-color, #171a21);
+    --text: var(--tg-theme-text-color, #f2f4f8);
+    --hint: var(--tg-theme-hint-color, #8b93a7);
+    --btn: var(--tg-theme-button-color, #5b8cff);
+    --btn-text: var(--tg-theme-button-text-color, #ffffff);
+    --danger:#ff5b6a; --ok:#35d07f; --warn:#ffb545; --radius:16px;
+  }
+  *{box-sizing:border-box} html,body{margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;padding:16px 14px 40px}
+  h1{font-size:22px;margin:2px 0 2px} .sub{color:var(--hint);font-size:13px;margin-bottom:16px}
+  .card{background:var(--card);border-radius:var(--radius);padding:16px;margin-bottom:14px;border:1px solid rgba(255,255,255,.06)}
+  .card h2{font-size:16px;margin:0 0 10px;display:flex;align-items:center;gap:8px}
+  .row{display:flex;gap:10px;flex-wrap:wrap}.grow{flex:1}
+  .stat{background:rgba(255,255,255,.045);border-radius:12px;padding:10px 12px;flex:1;min-width:96px}
+  .stat b{display:block;font-size:20px}.stat span{color:var(--hint);font-size:12px}
+  textarea,input[type=text]{width:100%;background:rgba(255,255,255,.05);color:var(--text);border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:10px 12px;font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;outline:none}
+  textarea:focus,input:focus{border-color:var(--btn)}
+  button{border:0;border-radius:12px;padding:10px 14px;font-weight:600;font-size:14px;cursor:pointer;background:var(--btn);color:var(--btn-text)}
+  button.ghost{background:rgba(255,255,255,.08);color:var(--text)}
+  button.danger{background:var(--danger);color:#fff}
+  button:disabled{opacity:.55;cursor:wait}
+  .hint{color:var(--hint);font-size:12px;margin-top:8px;word-break:break-word}
+  .pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:700}
+  .pill.ok{background:rgba(53,208,127,.18);color:var(--ok)} .pill.bad{background:rgba(255,91,106,.16);color:var(--danger)}
+  .pill.warn{background:rgba(255,181,69,.16);color:var(--warn)}
+  code{background:rgba(255,255,255,.07);padding:1px 6px;border-radius:6px;font-size:12px;word-break:break-all}
+  table{width:100%;border-collapse:collapse;font-size:12px} td,th{padding:6px 4px;border-bottom:1px solid rgba(255,255,255,.06);text-align:left;vertical-align:top}
+  .switch{position:relative;width:50px;height:28px;flex:none}
+  .switch input{opacity:0;width:0;height:0}
+  .track{position:absolute;inset:0;background:rgba(255,255,255,.15);border-radius:999px;transition:.2s}
+  .track:before{content:"";position:absolute;width:22px;height:22px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s}
+  .switch input:checked + .track{background:var(--warn)} .switch input:checked + .track:before{transform:translateX(22px)}
+  #toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(80px);background:#22262f;color:#fff;padding:11px 16px;border-radius:12px;font-size:14px;transition:.25s;max-width:88vw;box-shadow:0 10px 30px rgba(0,0,0,.4);z-index:9}
+  #toast.show{transform:translateX(-50%) translateY(0)}
+  .spin{display:inline-block;animation:s 1s linear infinite}@keyframes s{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<h1>🛠 Music Bot Admin</h1>
+<div class="sub">Live runtime control — every change applies instantly, no restarts. ✨</div>
+
+<div class="card">
+  <h2>📊 Overview <span class="grow"></span><button class="ghost" id="btnRefresh">🔄 Refresh</button></h2>
+  <div class="row">
+    <div class="stat"><b id="stUsers">—</b><span>users</span></div>
+    <div class="stat"><b id="stDownloads">—</b><span>downloads</span></div>
+    <div class="stat"><b id="stCache">—</b><span>cached files</span></div>
+  </div>
+  <div class="hint" id="stMeta">loading…</div>
+</div>
+
+<div class="card">
+  <h2>🌐 Proxy pool <span id="proxyState"></span></h2>
+  <textarea id="proxyInput" rows="3" placeholder="silver.ciaude.co.uk:8080:username:password&#10;One per line — any common vendor format works:&#10;host:port · user:pass@host:port · socks5://user:pass@host:port"></textarea>
+  <div class="row" style="margin-top:10px">
+    <button id="btnProxySave">💾 Apply now</button>
+    <button class="ghost" id="btnProxyTest">🧪 Test first</button>
+    <button class="danger" id="btnProxyClear">Remove</button>
+  </div>
+  <div class="hint" id="proxyCurrent"></div>
+</div>
+
+<div class="card">
+  <h2>🍪 Global cookies <span id="cookieState"></span></h2>
+  <textarea id="cookiesInput" rows="4" placeholder="Paste Netscape cookies.txt content here…"></textarea>
+  <div class="row" style="margin-top:10px">
+    <button id="btnCookiesSave">💾 Apply now</button>
+    <label class="grow"><button class="ghost" id="btnCookiesFile" type="button">📂 Upload file</button>
+      <input type="file" id="cookiesFile" accept=".txt" hidden /></label>
+    <button class="danger" id="btnCookiesClear">Remove</button>
+  </div>
+  <div class="hint" id="cookiesInfo">Stored encrypted (Fernet). Used for every download; users' personal cookies take precedence.</div>
+</div>
+
+<div class="card">
+  <h2>🧰 Housekeeping</h2>
+  <div class="row" style="align-items:center">
+    <div class="grow"><b>Maintenance mode</b><div class="hint">Non-admins get a polite “come back later”.</div></div>
+    <label class="switch"><input type="checkbox" id="maintenanceToggle"><span class="track"></span></label>
+  </div>
+  <div class="row" style="margin-top:12px">
+    <button class="ghost" id="btnClearCache">🗄 Clear file-id cache</button>
+    <button class="ghost" id="btnClearTmp">🧹 Wipe temp files</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>🕘 Recent downloads</h2>
+  <table><thead><tr><th>When</th><th>Type</th><th>Title</th><th></th></tr></thead><tbody id="recentBody"></tbody></table>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const tg = window.Telegram?.WebApp;
+tg?.ready(); tg?.expand();
+const $ = (id) => document.getElementById(id);
+const INIT = tg?.initData || "";
+
+function toast(msg){ const el=$("toast"); el.textContent=msg; el.classList.add("show");
+  tg?.HapticFeedback?.notificationOccurred?.("success"); setTimeout(()=>el.classList.remove("show"), 2600); }
+
+async function api(path, options={}){
+  const res = await fetch(path, { ...options, headers: {
+    "Content-Type":"application/json", "X-Telegram-Init-Data": INIT, ...(options.headers||{}) }});
+  const data = await res.json().catch(()=> ({}));
+  if(!res.ok) throw new Error(data.detail || ("HTTP "+res.status));
+  return data;
+}
+
+function fmtBytes(n){ if(!n) return "0 B"; const u=["B","KB","MB","GB"]; let i=0; while(n>1024&&i<3){n/=1024;i++} return n.toFixed(1)+" "+u[i]; }
+function fmtTime(ts){ return new Date(ts*1000).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}) + " " + new Date(ts*1000).toLocaleDateString(); }
+
+async function load(){
+  try{
+    const s = await api("/api/admin/state");
+    $("stUsers").textContent = s.users; $("stDownloads").textContent = s.downloads; $("stCache").textContent = s.cached_files;
+    $("stMeta").innerHTML = `⏱ uptime <b>${s.uptime}</b> · yt-dlp <code>${s.ytdlp}</code> · bot <code>v${s.version}</code> · ffmpeg ${s.ffmpeg?"✅":"❌"} · tmp ${fmtBytes(s.tmp_bytes)}`;
+    $("maintenanceToggle").checked = !!s.maintenance;
+
+    $("proxyState").innerHTML = s.proxies?.length ? `<span class="pill ok">${s.proxies.length} active</span>` : `<span class="pill bad">direct</span>`;
+    $("proxyCurrent").innerHTML = s.proxies?.length ? s.proxies.map(p=>`<code>${p}</code>`).join("<br>") : "No proxy — direct connection.";
+
+    $("cookieState").innerHTML = s.cookies.installed ? `<span class="pill ok">${s.cookies.total} cookies</span>` : `<span class="pill bad">empty jar</span>`;
+    if(s.cookies.installed){
+      const domains = Object.entries(s.cookies.domains||{}).slice(0,6).map(([d,c])=>`${d} (${c})`).join(" · ");
+      $("cookiesInfo").textContent = "Domains: " + domains;
+    }
+    $("recentBody").innerHTML = (s.recent||[]).map(r =>
+      `<tr><td>${fmtTime(r.created)}</td><td>${r.kind||""}</td><td>${(r.title||"").slice(0,48)}</td><td>${r.status==="ok"?"✅":"⚠️"}</td></tr>`).join("")
+      || `<tr><td colspan="4">Nothing yet — go download something 🎧</td></tr>`;
+  }catch(e){ toast("❌ " + e.message); }
+}
+
+$("btnRefresh").onclick = load;
+
+$("btnProxySave").onclick = async (ev)=>{ const b=ev.target; b.disabled=true;
+  try{ const r=await api("/api/admin/proxy",{method:"POST",body:JSON.stringify({proxies:$("proxyInput").value})});
+    toast("✅ Proxy applied: "+r.proxies.join(", ")); load(); }catch(e){ toast("❌ "+e.message); } finally{b.disabled=false;} };
+
+$("btnProxyTest").onclick = async (ev)=>{ const b=ev.target; b.disabled=true; b.innerHTML='<span class="spin">⏳</span> Testing…';
+  try{ const r=await api("/api/admin/proxy/test",{method:"POST",body:JSON.stringify({proxies:$("proxyInput").value})});
+    toast(r.ok ? `✅ Works! Exit IP ${r.ip} · ${r.ms} ms` : "❌ "+r.error); }catch(e){ toast("❌ "+e.message); }
+  finally{ b.disabled=false; b.textContent="🧪 Test first"; } };
+
+$("btnProxyClear").onclick = async ()=>{ try{ await api("/api/admin/proxy",{method:"DELETE"}); toast("✅ Proxy removed"); load(); }catch(e){ toast("❌ "+e.message);} };
+
+$("btnCookiesSave").onclick = async (ev)=>{ const b=ev.target; b.disabled=true;
+  try{ const r=await api("/api/admin/cookies",{method:"POST",body:JSON.stringify({content:$("cookiesInput").value})});
+    toast(`✅ ${r.total} cookies installed`); $("cookiesInput").value=""; load(); }catch(e){ toast("❌ "+e.message);} finally{b.disabled=false;} };
+
+$("btnCookiesFile").onclick = ()=> $("cookiesFile").click();
+$("cookiesFile").onchange = async (ev)=>{ const f=ev.target.files?.[0]; if(!f) return;
+  const fd=new FormData(); fd.append("file", f);
+  try{ const res=await fetch("/api/admin/cookies/upload",{method:"POST",body:fd,headers:{"X-Telegram-Init-Data":INIT}});
+    const r=await res.json(); if(!res.ok) throw new Error(r.detail||"Upload failed");
+    toast(`✅ ${r.total} cookies installed`); load(); }catch(e){ toast("❌ "+e.message);} };
+
+$("btnCookiesClear").onclick = async ()=>{ try{ await api("/api/admin/cookies",{method:"DELETE"}); toast("✅ Cookies removed"); load(); }catch(e){ toast("❌ "+e.message);} };
+
+$("maintenanceToggle").onchange = async (ev)=>{ try{ await api("/api/admin/maintenance",{method:"POST",body:JSON.stringify({enabled:ev.target.checked})});
+  toast(ev.target.checked ? "🛠 Maintenance ON" : "🟢 Maintenance OFF"); }catch(e){ toast("❌ "+e.message); ev.target.checked=!ev.target.checked; } };
+
+$("btnClearCache").onclick = async ()=>{ try{ const r=await api("/api/admin/clear-cache",{method:"POST"}); toast(`🗄 Removed ${r.removed} cached entries`); load(); }catch(e){ toast("❌ "+e.message);} };
+$("btnClearTmp").onclick   = async ()=>{ try{ await api("/api/admin/clear-tmp",{method:"POST"}); toast("🧹 Temp wiped"); load(); }catch(e){ toast("❌ "+e.message);} };
+
+load();
+</script>
+</body>
+</html>

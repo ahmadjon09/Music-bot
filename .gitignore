@@ -1,0 +1,12 @@
+.env
+*.db
+*.sqlite3
+data/
+tmp/
+__pycache__/
+*.pyc
+.venv/
+.idea/
+.vscode/
+cookies.txt
+*.log

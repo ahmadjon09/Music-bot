@@ -1,0 +1,1 @@
+"""Web layer: Gradio status page + FastAPI admin (Telegram Mini App)."""
