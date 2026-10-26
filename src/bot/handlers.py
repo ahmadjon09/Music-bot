@@ -28,6 +28,8 @@ from aiogram.types import (
 )
 
 from .. import __version__, security
+from ..cache import (all_keys, audio_key, canonicalize_url, extractor_key,
+                     photo_key, upload_audio_key, video_key)
 from ..config import Settings
 from ..db import Database
 from ..downloader import Downloader, MediaError, Progress, ytdlp_version
@@ -35,7 +37,7 @@ from ..gallery import fetch_gallery
 from ..i18n import LANGS, normalize_lang, t
 from ..metadata import audio_duration, fmt_duration, prepare_cover, tag_audio
 from ..proxy import ProxyParseError
-from ..recognize import recognize_file
+from ..recognize import RecognizedTrack, recognize_file
 from ..runtime import Runtime
 from . import keyboards as kb
 from .state import DownloadGate, SearchStore, TokenRegistry, progress_bar, spinner_frame, uptime_text
@@ -369,9 +371,127 @@ async def on_document(message: Message, bot: Bot) -> None:
                            domains=len(report["domains"])))
 
 
-# ── delivery helpers ─────────────────────────────────────────────────────────
+# ── cache-aware delivery ─────────────────────────────────────────────────────
+# Every file we successfully send is remembered by its Telegram file_id.
+# The next user asking for the same media — via *any* spelling of the URL —
+# gets it re-sent from Telegram's own servers. No download, no disk, ~instant.
+
+def _canonicals_for(canonical: str, info) -> list[str]:
+    extracted = extractor_key(info.extractor, info.id) if info and info.id else None
+    return all_keys(canonical, extracted)
+
+
+async def _send_cached_single(message: Message, hit: dict, *, lang: str, url: str) -> None:
+    title = _esc(hit.get("title") or "")
+    if hit["kind"] == "audio":
+        await message.answer_audio(hit["file_id"])
+    elif hit["kind"] == "photo":
+        caption = (f"🖼 <b>{title}</b>\n" if title else "") + t(lang, "from_cache")
+        await message.answer_photo(hit["file_id"], caption=caption)
+    else:
+        token = Deps.tokens.put(url)
+        caption = (f"🎬 <b>{title}</b>\n" if title else "") + t(lang, "from_cache")
+        await message.answer_video(hit["file_id"], caption=caption,
+                                   reply_markup=kb.delivered_video_kb(lang, token))
+
+
+async def _send_cached_album(message: Message, items: list[dict], *, lang: str, title: str = "") -> None:
+    caption = (t(lang, "carousel_caption", title=_esc(title)) + "\n" if title else "") + t(lang, "from_cache")
+    for start in range(0, len(items), 10):
+        chunk = items[start:start + 10]
+        if len(chunk) == 1:
+            item = chunk[0]
+            cap = caption if start == 0 else None
+            if item.get("kind") == "video":
+                await message.answer_video(item["file_id"], caption=cap)
+            else:
+                await message.answer_photo(item["file_id"], caption=cap)
+            continue
+        media = []
+        for idx, item in enumerate(chunk):
+            cap = caption if (start == 0 and idx == 0) else None
+            if item.get("kind") == "video":
+                media.append(InputMediaVideo(media=item["file_id"], caption=cap))
+            else:
+                media.append(InputMediaPhoto(media=item["file_id"], caption=cap))
+        await message.answer_media_group(media)
+
+
+async def _try_cache(message: Message, canonicals: list[str], *, lang: str, user: dict,
+                     user_id: int, url: str, force: str | None,
+                     status: StatusMessage | None = None) -> bool:
+    """Serve from the file_id cache when possible. True = delivered, done."""
+
+    async def _serve_file(key_of) -> tuple[str, str] | None:
+        for canon in canonicals:
+            key = key_of(canon)
+            hit = await Deps.db.cache_get(key)
+            if not hit:
+                continue
+            try:
+                await _send_cached_single(message, hit, lang=lang, url=url)
+                return hit["kind"], hit.get("title") or ""
+            except Exception:  # noqa: BLE001 — stale file_id: forget it, re-download
+                log.debug("evicting stale cache entry %s", key)
+                await Deps.db.cache_delete(key)
+        return None
+
+    async def _serve_album() -> tuple[str, str] | None:
+        for canon in canonicals:
+            items = await Deps.db.album_get(canon)
+            if not items:
+                continue
+            try:
+                await _send_cached_album(message, items, lang=lang)
+                return "album", ""
+            except Exception:  # noqa: BLE001
+                await Deps.db.album_delete(canon)
+        return None
+
+    quality = str(user.get("quality", "720"))
+    served: tuple[str, str] | None = None
+    if force == "audio":
+        served = await _serve_file(audio_key)
+    elif force == "video":
+        served = await _serve_file(lambda c: video_key(c, quality))
+    else:
+        # Default mode must return what the link *is*. The media index knows.
+        primary = None
+        for canon in canonicals:
+            primary = await Deps.db.index_get(canon)
+            if primary:
+                break
+        if primary == "album":
+            served = await _serve_album()
+        elif primary == "audio":
+            served = await _serve_file(audio_key)
+        elif primary == "photo":
+            served = await _serve_file(photo_key) or await _serve_album()
+        elif primary == "video":
+            served = await _serve_file(lambda c: video_key(c, quality))
+        else:  # unknown link — try the safe kinds (never guess "audio")
+            served = await _serve_album() or await _serve_file(lambda c: video_key(c, quality)) \
+                or await _serve_file(photo_key)
+
+    if not served:
+        return False
+    kind, title = served
+    if status:
+        await status.delete()
+    await Deps.db.bump_downloads(user_id)
+    await Deps.db.log_download(user_id, url, f"{kind}⚡cache", title)
+    return True
+
+
+async def _remember(canonicals: list[str], primary: str | None) -> None:
+    if primary:
+        for canon in canonicals:
+            await Deps.db.index_put(canon, primary)
+
+
 async def deliver_audio(message: Message, downloaded, job: Path, *, lang: str,
-                        user_id: int, url: str, cache_key: str | None, proxy: str | None,
+                        user_id: int, url: str, canonicals: list[str],
+                        set_primary: bool, proxy: str | None,
                         status: StatusMessage) -> None:
     await status.set("processing")
     raw_cover = await _fetch_bytes(downloaded.thumbnail_url, proxy)
@@ -388,14 +508,17 @@ async def deliver_audio(message: Message, downloaded, job: Path, *, lang: str,
         FSInputFile(str(downloaded.path)), title=downloaded.title[:64],
         performer=(downloaded.performer or "")[:64] or None,
         duration=duration or None, thumbnail=thumb)
-    if cache_key and sent.audio:
-        await Deps.db.cache_put(cache_key, sent.audio.file_id, "audio",
-                                downloaded.title, downloaded.performer, duration)
+    if sent.audio:  # ⚡️ remember it under every spelling of this media
+        for canon in canonicals:
+            await Deps.db.cache_put(audio_key(canon), sent.audio.file_id, "audio",
+                                    downloaded.title, downloaded.performer, duration)
+        await _remember(canonicals, "audio" if set_primary else None)
     await _after_delivery(message, status, user_id, url, "audio", downloaded.title)
 
 
 async def deliver_video(message: Message, downloaded, job: Path, *, lang: str,
-                        user_id: int, url: str, cache_key: str | None, proxy: str | None,
+                        user_id: int, url: str, canonicals: list[str], quality: str,
+                        set_primary: bool, proxy: str | None,
                         status: StatusMessage) -> None:
     await status.set("uploading")
     thumb = await _thumb_file(downloaded.thumbnail_url, job, proxy)
@@ -406,24 +529,32 @@ async def deliver_video(message: Message, downloaded, job: Path, *, lang: str,
         thumbnail=thumb, supports_streaming=True,
         caption=f"🎬 <b>{_esc(downloaded.title)}</b>",
         reply_markup=kb.delivered_video_kb(lang, token))
-    if cache_key and sent.video:
-        await Deps.db.cache_put(cache_key, sent.video.file_id, "video",
-                                downloaded.title, downloaded.performer, downloaded.duration)
+    if sent.video:
+        for canon in canonicals:
+            await Deps.db.cache_put(video_key(canon, quality), sent.video.file_id, "video",
+                                    downloaded.title, downloaded.performer, downloaded.duration)
+        await _remember(canonicals, "video" if set_primary else None)
     await _after_delivery(message, status, user_id, url, "video", downloaded.title)
 
 
 async def deliver_album(message: Message, files: list, *, lang: str, user_id: int,
-                        url: str, title: str, status: StatusMessage) -> None:
+                        url: str, title: str, canonicals: list[str],
+                        status: StatusMessage) -> None:
     await status.set("uploading")
     caption = t(lang, "carousel_caption", title=_esc(title)) if title else None
+    delivered: list[dict] = []  # file_ids of what actually landed, in order
     for start in range(0, len(files), 10):  # Telegram albums: max 10 items
         chunk = files[start:start + 10]
         if len(chunk) == 1:
             item = chunk[0]
             if item.kind == "video":
-                await message.answer_video(FSInputFile(str(item.path)), caption=caption)
+                sent = await message.answer_video(FSInputFile(str(item.path)), caption=caption)
+                if sent.video:
+                    delivered.append({"kind": "video", "file_id": sent.video.file_id})
             else:
-                await message.answer_photo(FSInputFile(str(item.path)), caption=caption)
+                sent = await message.answer_photo(FSInputFile(str(item.path)), caption=caption)
+                if sent.photo:
+                    delivered.append({"kind": "photo", "file_id": sent.photo[-1].file_id})
             continue
         media = []
         for idx, item in enumerate(chunk):
@@ -431,7 +562,16 @@ async def deliver_album(message: Message, files: list, *, lang: str, user_id: in
             cap = caption if (start == 0 and idx == 0) else None
             media.append(InputMediaVideo(media=fs, caption=cap) if item.kind == "video"
                          else InputMediaPhoto(media=fs, caption=cap))
-        await message.answer_media_group(media)
+        sent_group = await message.answer_media_group(media)
+        for sent in sent_group:
+            if sent.video:
+                delivered.append({"kind": "video", "file_id": sent.video.file_id})
+            elif sent.photo:
+                delivered.append({"kind": "photo", "file_id": sent.photo[-1].file_id})
+    if delivered:  # ⚡️ the whole carousel, cached as one ordered payload
+        for canon in canonicals:
+            await Deps.db.album_put(canon, delivered, title)
+        await _remember(canonicals, "album")
     await _after_delivery(message, status, user_id, url, "album", title)
 
 
@@ -444,10 +584,23 @@ async def _after_delivery(message: Message, status: StatusMessage, user_id: int,
 
 # ── the main pipeline: one URL in, media out ─────────────────────────────────
 async def process_url(message: Message, url: str, *, lang: str, user: dict,
-                      force: str | None = None, origin: Message | None = None) -> None:
-    """force: 'audio' | 'video' | None (None = original media, the default)."""
+                      force: str | None = None, origin: Message | None = None,
+                      actor_id: int | None = None) -> None:
+    """force: 'audio' | 'video' | None (None = original media, the default).
+
+    Pipeline: canonicalise → ⚡ cache (pre-network!) → busy gate → extract →
+    ⚡ cache again under the resolved id (short links) → download → deliver →
+    remember everything for the next user.
+    """
     assert message.from_user
-    user_id = message.from_user.id
+    user_id = actor_id or message.from_user.id
+    canonical = canonicalize_url(url)
+
+    # ⚡️ Fastest path in the building: no queue, no gate, no yt-dlp at all.
+    if await _try_cache(message, [canonical], lang=lang, user=user,
+                        user_id=user_id, url=url, force=force):
+        return
+
     if Deps.gate.user_busy(user_id):
         await message.answer(t(lang, "busy_user"))
         return
@@ -467,26 +620,14 @@ async def process_url(message: Message, url: str, *, lang: str, user: dict,
                         raise
                     info = None  # → gallery-dl gets a shot below
 
-                # ⚡️ Cache hit: re-send by file_id, zero downloading.
-                if info and not info.is_carousel:
-                    wanted = force or ("audio" if (info.raw.get("track") and not info.has_video) else None)
-                    cache_kind = wanted or ("video" if info.has_video else None)
-                    if cache_kind:
-                        hit = await Deps.db.cache_get(f"{info.cache_base}:{cache_kind}")
-                        if hit:
-                            try:
-                                token = Deps.tokens.put(url)
-                                if cache_kind == "audio":
-                                    await message.answer_audio(hit["file_id"])
-                                else:
-                                    await message.answer_video(
-                                        hit["file_id"],
-                                        caption=f"🎬 <b>{_esc(info.title)}</b>\n{t(lang, 'from_cache')}",
-                                        reply_markup=kb.delivered_video_kb(lang, token))
-                                await _after_delivery(message, status, user_id, url, cache_kind, info.title)
-                                return
-                            except Exception:  # noqa: BLE001 — stale file_id, just re-download
-                                log.debug("stale cache entry for %s", info.cache_base)
+                canonicals = _canonicals_for(canonical, info)
+                quality = str(user.get("quality", "720"))
+
+                # Second chance: short links resolve to an id we may know already.
+                if len(canonicals) > 1 and await _try_cache(
+                        message, canonicals, lang=lang, user=user,
+                        user_id=user_id, url=url, force=force, status=status):
+                    return
 
                 if info and info.is_carousel:
                     await status.set("downloading_simple")
@@ -497,38 +638,45 @@ async def process_url(message: Message, url: str, *, lang: str, user: dict,
                                                      limit=Deps.settings.carousel_limit,
                                                      max_filesize=Deps.settings.max_filesize)
                     await deliver_album(message, files, lang=lang, user_id=user_id,
-                                        url=url, title=info.title, status=status)
+                                        url=url, title=info.title,
+                                        canonicals=canonicals, status=status)
                     return
 
                 kind = force or ("video" if info and info.has_video else None)
                 if kind == "audio":
                     downloaded = await Deps.downloader.download_audio(
                         url, job, cookiefile=cookiefile, proxy=proxy, on_progress=status.progress)
-                    await deliver_audio(message, downloaded, job, lang=lang, user_id=user_id, url=url,
-                                        cache_key=f"{info.cache_base}:audio" if info else None,
-                                        proxy=proxy, status=status)
+                    await deliver_audio(
+                        message, downloaded, job, lang=lang, user_id=user_id, url=url,
+                        canonicals=canonicals,
+                        set_primary=bool(info and not info.has_video),  # forced MP3 of a video keeps "video" primary
+                        proxy=proxy, status=status)
                     return
                 if kind == "video":
                     downloaded = await Deps.downloader.download_video(
                         url, job, cookiefile=cookiefile, proxy=proxy,
-                        quality=str(user.get("quality", "720")), on_progress=status.progress)
-                    await deliver_video(message, downloaded, job, lang=lang, user_id=user_id, url=url,
-                                        cache_key=f"{info.cache_base}:video" if info else None,
-                                        proxy=proxy, status=status)
+                        quality=quality, on_progress=status.progress)
+                    await deliver_video(
+                        message, downloaded, job, lang=lang, user_id=user_id, url=url,
+                        canonicals=canonicals, quality=quality,
+                        set_primary=bool(info is None or info.has_video),
+                        proxy=proxy, status=status)
                     return
                 if info and info.is_image:
                     downloaded = await Deps.downloader.download_image(
                         url, job, cookiefile=cookiefile, proxy=proxy)
                     await deliver_album(message, [downloaded], lang=lang, user_id=user_id,
-                                        url=url, title=info.title, status=status)
+                                        url=url, title=info.title,
+                                        canonicals=canonicals, status=status)
                     return
                 if kind is None and info is not None:
                     # Single non-video, non-image media ⇒ audio (SoundCloud & co.)
                     downloaded = await Deps.downloader.download_audio(
                         url, job, cookiefile=cookiefile, proxy=proxy, on_progress=status.progress)
-                    await deliver_audio(message, downloaded, job, lang=lang, user_id=user_id, url=url,
-                                        cache_key=f"{info.cache_base}:audio",
-                                        proxy=proxy, status=status)
+                    await deliver_audio(
+                        message, downloaded, job, lang=lang, user_id=user_id, url=url,
+                        canonicals=canonicals, set_primary=True,
+                        proxy=proxy, status=status)
                     return
 
                 # Last resort: gallery-dl is brilliant at image-first sites.
@@ -537,7 +685,8 @@ async def process_url(message: Message, url: str, *, lang: str, user: dict,
                                              limit=Deps.settings.carousel_limit,
                                              max_filesize=Deps.settings.max_filesize)
                 await deliver_album(message, files, lang=lang, user_id=user_id, url=url,
-                                    title=(info.title if info else ""), status=status)
+                                    title=(info.title if info else ""),
+                                    canonicals=canonicals, status=status)
     except MediaError as exc:
         log.info("media error for %s: %s", url, exc)
         with contextlib.suppress(Exception):
@@ -590,7 +739,7 @@ async def on_mp3_button(call: CallbackQuery) -> None:
     msg = call.message
     assert isinstance(msg, Message)
     # Synthesize a message-like context: answer into the same chat.
-    await process_url(msg, str(url), lang=lang, user=user, force="audio")
+    await process_url(msg, str(url), lang=lang, user=user, force="audio", actor_id=call.from_user.id)
 
 
 # ── YouTube text search ──────────────────────────────────────────────────────
@@ -682,7 +831,7 @@ async def on_pick(call: CallbackQuery) -> None:
     assert isinstance(msg, Message)
     with contextlib.suppress(Exception):
         await msg.delete()
-    await process_url(msg, chosen.url, lang=lang, user=user, force="audio")
+    await process_url(msg, chosen.url, lang=lang, user=user, force="audio", actor_id=call.from_user.id)
 
 
 # ── music recognition (Shazam) ───────────────────────────────────────────────
@@ -692,8 +841,10 @@ async def on_incoming_video(message: Message) -> None:
     if message.chat.type != "private":
         return  # in groups, wait for an explicit /shazam — manners!
     lang, _ = await _lang(message.from_user.id, message.from_user.language_code)
-    file_id = (message.video or message.video_note or message.animation).file_id  # type: ignore[union-attr]
-    token = Deps.tokens.put({"file_id": file_id, "user_id": message.from_user.id})
+    media = message.video or message.video_note or message.animation
+    assert media
+    token = Deps.tokens.put({"file_id": media.file_id, "unique": media.file_unique_id,
+                             "user_id": message.from_user.id})
     await message.answer(t(lang, "video_received"), reply_markup=kb.incoming_video_kb(lang, token))
 
 
@@ -708,18 +859,32 @@ async def cmd_shazam(message: Message, bot: Bot) -> None:
     if media is None:
         await message.answer(t(lang, "shazam_hint"))
         return
-    await _run_recognition(message, bot, media.file_id, lang=lang, user_id=message.from_user.id)
+    await _run_recognition(message, bot, media.file_id, lang=lang,
+                           user_id=message.from_user.id, unique_id=getattr(media, 'file_unique_id', None))
 
 
 async def _run_recognition(message: Message, bot: Bot, file_id: str, *, lang: str, user_id: int,
-                           origin: Message | None = None) -> None:
+                           origin: Message | None = None, unique_id: str | None = None) -> None:
     status_msg = origin or await message.answer(t(lang, "shazam_working", spinner=spinner_frame()))
     job = _job_dir()
     try:
-        tg_file = await bot.get_file(file_id)
-        local = job / ("input" + Path(tg_file.file_path or ".mp4").suffix)
-        await bot.download_file(tg_file.file_path, destination=str(local))  # type: ignore[arg-type]
-        track = await recognize_file(local, job)
+        track = None
+        if unique_id:  # ⚡️ recognised this exact file before? Answer from memory.
+            cached = await Deps.db.recognition_get(unique_id)
+            if cached:
+                track = RecognizedTrack(title=cached["title"], artist=cached["artist"],
+                                        album=cached.get("album") or "",
+                                        cover_url=cached.get("cover_url"),
+                                        shazam_url=cached.get("shazam_url"))
+        if track is None:
+            tg_file = await bot.get_file(file_id)
+            local = job / ("input" + Path(tg_file.file_path or ".mp4").suffix)
+            await bot.download_file(tg_file.file_path, destination=str(local))  # type: ignore[arg-type]
+            track = await recognize_file(local, job)
+            if track and unique_id:
+                await Deps.db.recognition_put(unique_id, title=track.title, artist=track.artist,
+                                              album=track.album, cover_url=track.cover_url,
+                                              shazam_url=track.shazam_url)
         if not track:
             with contextlib.suppress(Exception):
                 await status_msg.edit_text(t(lang, "shazam_notfound"))
@@ -759,7 +924,8 @@ async def on_shazam_button(call: CallbackQuery, bot: Bot) -> None:
     if not payload.get("file_id"):
         await msg.answer(t(lang, "search_expired"))
         return
-    await _run_recognition(msg, bot, payload["file_id"], lang=lang, user_id=call.from_user.id)
+    await _run_recognition(msg, bot, payload["file_id"], lang=lang,
+                           user_id=call.from_user.id, unique_id=payload.get("unique"))
 
 
 @router.callback_query(F.data.startswith("vaudio:"))
@@ -779,6 +945,15 @@ async def on_video_audio(call: CallbackQuery, bot: Bot) -> None:
     if not ffmpeg:
         await msg.answer(t(lang, "error_generic"))
         return
+    # ⚡️ Same video forwarded twice? The extracted MP3 is already on Telegram.
+    ckey = upload_audio_key(payload.get("unique") or payload["file_id"])
+    hit = await Deps.db.cache_get(ckey)
+    if hit:
+        try:
+            await msg.answer_audio(hit["file_id"])
+            return
+        except Exception:  # noqa: BLE001 — stale id, extract again below
+            await Deps.db.cache_delete(ckey)
     status = StatusMessage(await msg.answer(t(lang, "downloading_simple", spinner=spinner_frame())), lang)
     job = _job_dir()
     try:
@@ -792,7 +967,11 @@ async def on_video_audio(call: CallbackQuery, bot: Bot) -> None:
         await asyncio.wait_for(proc.wait(), timeout=600)
         if out.is_file():
             await status.set("uploading")
-            await msg.answer_audio(FSInputFile(str(out)))
+            sent = await msg.answer_audio(FSInputFile(str(out)))
+            if sent.audio:
+                await Deps.db.cache_put(ckey, sent.audio.file_id, "audio",
+                                        sent.audio.title or "", sent.audio.performer or "",
+                                        sent.audio.duration or 0)
             await status.delete()
         else:
             await msg.answer(t(lang, "error_generic"))
@@ -821,7 +1000,7 @@ async def on_rec_mp3(call: CallbackQuery) -> None:
     except MediaError:
         results = []
     if results:
-        await process_url(msg, results[0].url, lang=lang, user=user, force="audio")
+        await process_url(msg, results[0].url, lang=lang, user=user, force="audio", actor_id=call.from_user.id)
     else:
         await msg.answer(t(lang, "search_empty"))
 

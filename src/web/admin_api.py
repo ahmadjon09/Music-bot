@@ -81,6 +81,7 @@ def build_admin_router(settings: Settings, db: Database, runtime: Runtime) -> AP
             "users": stats["users"],
             "downloads": stats["downloads"],
             "cached_files": stats["cached"],
+            "cache": await db.cache_stats(),
             "ytdlp": ytdlp_version(),
             "ffmpeg": bool(resolve_ffmpeg()),
             "maintenance": runtime.maintenance,

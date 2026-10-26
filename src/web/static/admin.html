@@ -125,7 +125,7 @@ async function load(){
   try{
     const s = await api("/api/admin/state");
     $("stUsers").textContent = s.users; $("stDownloads").textContent = s.downloads; $("stCache").textContent = s.cached_files;
-    $("stMeta").innerHTML = `⏱ uptime <b>${s.uptime}</b> · yt-dlp <code>${s.ytdlp}</code> · bot <code>v${s.version}</code> · ffmpeg ${s.ffmpeg?"✅":"❌"} · tmp ${fmtBytes(s.tmp_bytes)}`;
+    $("stMeta").innerHTML = `⏱ uptime <b>${s.uptime}</b> · yt-dlp <code>${s.ytdlp}</code> · bot <code>v${s.version}</code> · ffmpeg ${s.ffmpeg?"✅":"❌"} · tmp ${fmtBytes(s.tmp_bytes)} · ⚡ cache hits <b>${s.cache?.hits ?? 0}</b> (${s.cache?.files ?? 0} files + ${s.cache?.albums ?? 0} albums)`;
     $("maintenanceToggle").checked = !!s.maintenance;
 
     $("proxyState").innerHTML = s.proxies?.length ? `<span class="pill ok">${s.proxies.length} active</span>` : `<span class="pill bad">direct</span>`;
