@@ -16,7 +16,6 @@ import shutil
 import tempfile
 from pathlib import Path
 
-import aiohttp
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
@@ -30,16 +29,19 @@ from aiogram.types import (
 from .. import __version__, security
 from ..cache import (all_keys, audio_key, canonicalize_url, extractor_key,
                      photo_key, upload_audio_key, video_key)
+from ..cobalt import CobaltClient, is_cobalt_url
 from ..config import Settings
 from ..db import Database
 from ..downloader import Downloader, MediaError, Progress, ytdlp_version
 from ..gallery import fetch_gallery
+from ..httputil import proxy_session
 from ..i18n import LANGS, normalize_lang, t
-from ..metadata import audio_duration, fmt_duration, prepare_cover, tag_audio
+from ..metadata import audio_duration, fmt_duration, media_filename, prepare_cover, tag_audio
 from ..proxy import ProxyParseError
 from ..recognize import RecognizedTrack, recognize_file
 from ..runtime import Runtime
 from . import keyboards as kb
+from .profile import reset_bot_profile
 from .state import DownloadGate, SearchStore, TokenRegistry, progress_bar, spinner_frame, uptime_text
 
 log = logging.getLogger("musicbot.handlers")
@@ -53,6 +55,7 @@ class Deps:
     db: Database
     runtime: Runtime
     downloader: Downloader
+    cobalt: CobaltClient
     gate: DownloadGate
     searches = SearchStore()
     tokens = TokenRegistry()
@@ -60,6 +63,7 @@ class Deps:
 
 def init_deps(settings: Settings, db: Database, runtime: Runtime, downloader: Downloader) -> None:
     Deps.settings, Deps.db, Deps.runtime, Deps.downloader = settings, db, runtime, downloader
+    Deps.cobalt = CobaltClient(settings)
     Deps.gate = DownloadGate(settings.max_global_downloads, settings.max_user_downloads)
 
 
@@ -128,9 +132,8 @@ async def _fetch_bytes(url: str | None, proxy: str | None = None) -> bytes | Non
     if not url:
         return None
     try:
-        timeout = aiohttp.ClientTimeout(total=20)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, proxy=proxy) as resp:
+        async with proxy_session(proxy, timeout=20) as (session, req_proxy):
+            async with session.get(url, proxy=req_proxy) as resp:
                 if resp.status == 200:
                     return await resp.read()
     except Exception:  # noqa: BLE001 — thumbnails are decoration, not cargo
@@ -284,6 +287,18 @@ async def cmd_admin(message: Message) -> None:
         await message.answer(t(lang, "admin_no_url"))
         return
     await message.answer(t(lang, "admin_panel_text"), reply_markup=markup)
+
+
+@router.message(Command("resetprofile"))
+async def cmd_resetprofile(message: Message, bot: Bot) -> None:
+    """Admin shortcut for the panel's Reset: re-brand name/descriptions/commands."""
+    assert message.from_user
+    lang, _ = await _lang(message.from_user.id, message.from_user.language_code)
+    if not Deps.settings.is_admin(message.from_user.id):
+        await message.answer(t(lang, "admin_only"))
+        return
+    await reset_bot_profile(bot)
+    await message.answer(t(lang, "profile_reset_done"))
 
 
 @router.message(Command("setproxy"))
@@ -505,7 +520,10 @@ async def deliver_audio(message: Message, downloaded, job: Path, *, lang: str,
         thumb = FSInputFile(str(thumb_path))
     await status.set("uploading")
     sent = await message.answer_audio(
-        FSInputFile(str(downloaded.path)), title=downloaded.title[:64],
+        FSInputFile(str(downloaded.path),
+                    filename=media_filename(downloaded.title, downloaded.performer,
+                                            downloaded.path.suffix)),
+        title=downloaded.title[:64],
         performer=(downloaded.performer or "")[:64] or None,
         duration=duration or None, thumbnail=thumb)
     if sent.audio:  # ⚡️ remember it under every spelling of this media
@@ -524,7 +542,10 @@ async def deliver_video(message: Message, downloaded, job: Path, *, lang: str,
     thumb = await _thumb_file(downloaded.thumbnail_url, job, proxy)
     token = Deps.tokens.put(url)
     sent = await message.answer_video(
-        FSInputFile(str(downloaded.path)), duration=downloaded.duration or None,
+        FSInputFile(str(downloaded.path),
+                    filename=media_filename(downloaded.title, downloaded.performer,
+                                            downloaded.path.suffix)),
+        duration=downloaded.duration or None,
         width=downloaded.width or None, height=downloaded.height or None,
         thumbnail=thumb, supports_streaming=True,
         caption=f"🎬 <b>{_esc(downloaded.title)}</b>",
@@ -610,18 +631,47 @@ async def process_url(message: Message, url: str, *, lang: str, user: dict,
     try:
         async with Deps.gate.slot(user_id):
             job = _job_dir()
-            async with Deps.runtime.ytdlp_context(user_id) as (cookiefile, proxy):
+            async with Deps.runtime.ytdlp_context(user_id) as (cookiefile, proxies):
+                proxy = proxies[0] if proxies else None  # single-exit helpers
+                quality = str(user.get("quality", "720"))
                 await status.set("analyzing")
+
+                # 🚀 Cobalt fast lane: Instagram/TikTok/X/… in one POST.
+                # yt-dlp keeps YouTube + every explicit audio request.
+                if not force and Deps.cobalt.enabled and is_cobalt_url(url):
+                    try:
+                        files = await Deps.cobalt.fetch(
+                            url, job, quality=quality,
+                            proxies=[*proxies, None],  # pool exits, then direct
+                            limit=Deps.settings.carousel_limit)
+                        first = files[0]
+                        if len(files) > 1 or first.kind == "photo":
+                            await deliver_album(message, files, lang=lang, user_id=user_id,
+                                                url=url, title=first.title,
+                                                canonicals=[canonical], status=status)
+                        elif first.kind == "audio":
+                            await deliver_audio(message, first, job, lang=lang,
+                                                user_id=user_id, url=url,
+                                                canonicals=[canonical], set_primary=True,
+                                                proxy=proxy, status=status)
+                        else:
+                            await deliver_video(message, first, job, lang=lang,
+                                                user_id=user_id, url=url,
+                                                canonicals=[canonical], quality=quality,
+                                                set_primary=True, proxy=proxy, status=status)
+                        return
+                    except MediaError as exc:  # cobalt shrugged → classic pipeline
+                        log.info("cobalt missed %s (%s); yt-dlp takes over", url, exc)
+
                 info = None
                 try:
-                    info = await Deps.downloader.extract(url, cookiefile=cookiefile, proxy=proxy)
+                    info = await Deps.downloader.extract(url, cookiefile=cookiefile, proxy=proxies)
                 except MediaError:
                     if force:  # honour explicit /audio even when probing failed
                         raise
                     info = None  # → gallery-dl gets a shot below
 
                 canonicals = _canonicals_for(canonical, info)
-                quality = str(user.get("quality", "720"))
 
                 # Second chance: short links resolve to an id we may know already.
                 if len(canonicals) > 1 and await _try_cache(
@@ -632,7 +682,7 @@ async def process_url(message: Message, url: str, *, lang: str, user: dict,
                 if info and info.is_carousel:
                     await status.set("downloading_simple")
                     files = await Deps.downloader.download_carousel(
-                        info, job, cookiefile=cookiefile, proxy=proxy, on_progress=status.progress)
+                        info, job, cookiefile=cookiefile, proxy=proxies, on_progress=status.progress)
                     if not files:
                         files = await fetch_gallery(url, job, cookiefile=cookiefile, proxy=proxy,
                                                      limit=Deps.settings.carousel_limit,
@@ -645,7 +695,7 @@ async def process_url(message: Message, url: str, *, lang: str, user: dict,
                 kind = force or ("video" if info and info.has_video else None)
                 if kind == "audio":
                     downloaded = await Deps.downloader.download_audio(
-                        url, job, cookiefile=cookiefile, proxy=proxy, on_progress=status.progress)
+                        url, job, cookiefile=cookiefile, proxy=proxies, on_progress=status.progress)
                     await deliver_audio(
                         message, downloaded, job, lang=lang, user_id=user_id, url=url,
                         canonicals=canonicals,
@@ -654,7 +704,7 @@ async def process_url(message: Message, url: str, *, lang: str, user: dict,
                     return
                 if kind == "video":
                     downloaded = await Deps.downloader.download_video(
-                        url, job, cookiefile=cookiefile, proxy=proxy,
+                        url, job, cookiefile=cookiefile, proxy=proxies,
                         quality=quality, on_progress=status.progress)
                     await deliver_video(
                         message, downloaded, job, lang=lang, user_id=user_id, url=url,
@@ -664,7 +714,7 @@ async def process_url(message: Message, url: str, *, lang: str, user: dict,
                     return
                 if info and info.is_image:
                     downloaded = await Deps.downloader.download_image(
-                        url, job, cookiefile=cookiefile, proxy=proxy)
+                        url, job, cookiefile=cookiefile, proxy=proxies)
                     await deliver_album(message, [downloaded], lang=lang, user_id=user_id,
                                         url=url, title=info.title,
                                         canonicals=canonicals, status=status)
@@ -672,7 +722,7 @@ async def process_url(message: Message, url: str, *, lang: str, user: dict,
                 if kind is None and info is not None:
                     # Single non-video, non-image media ⇒ audio (SoundCloud & co.)
                     downloaded = await Deps.downloader.download_audio(
-                        url, job, cookiefile=cookiefile, proxy=proxy, on_progress=status.progress)
+                        url, job, cookiefile=cookiefile, proxy=proxies, on_progress=status.progress)
                     await deliver_audio(
                         message, downloaded, job, lang=lang, user_id=user_id, url=url,
                         canonicals=canonicals, set_primary=True,
@@ -760,8 +810,8 @@ async def run_search(message: Message, query: str, *, lang: str, user_id: int,
         t(lang, "searching", spinner=spinner_frame(), query=_esc(query)))
     status = StatusMessage(status_msg, lang)
     try:
-        async with Deps.runtime.ytdlp_context(user_id) as (cookiefile, proxy):
-            results = await Deps.downloader.search(query, cookiefile=cookiefile, proxy=proxy)
+        async with Deps.runtime.ytdlp_context(user_id) as (cookiefile, proxies):
+            results = await Deps.downloader.search(query, cookiefile=cookiefile, proxy=proxies)
     except MediaError as exc:
         with contextlib.suppress(Exception):
             await status_msg.edit_text(t(lang, exc.i18n_key))
@@ -995,8 +1045,8 @@ async def on_rec_mp3(call: CallbackQuery) -> None:
         return
     # Search, grab the top hit, deliver it as MP3 — musical telepathy, basically.
     try:
-        async with Deps.runtime.ytdlp_context(call.from_user.id) as (cookiefile, proxy):
-            results = await Deps.downloader.search(str(query), cookiefile=cookiefile, proxy=proxy)
+        async with Deps.runtime.ytdlp_context(call.from_user.id) as (cookiefile, proxies):
+            results = await Deps.downloader.search(str(query), cookiefile=cookiefile, proxy=proxies)
     except MediaError:
         results = []
     if results:

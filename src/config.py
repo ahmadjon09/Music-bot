@@ -90,7 +90,8 @@ class Settings:
         default_factory=lambda: os.getenv("SECRET_KEY", "dev-secret-change-me").strip()
     )
     public_base_url: str = field(default_factory=derive_public_url)
-    initial_proxy: str = field(default_factory=lambda: os.getenv("PROXY", "").strip())
+    initial_proxy: str = field(
+        default_factory=lambda: (os.getenv("PROXY", "") or os.getenv("WARP_PROXY", "")).strip())
 
     # Storage — on HF Spaces the repo dir is writable; DATA_DIR lets Docker
     # users point at a mounted volume instead.
@@ -106,6 +107,19 @@ class Settings:
     search_results: int = 30          # fetched & filtered, shown 10 per page
     search_page_size: int = 10
     carousel_limit: int = 20          # hard cap so one post can't nuke the RAM
+
+    # Cobalt (Instagram/TikTok/X/… fast lane). Public instance by default;
+    # point COBALT_API_URL at your own instance for heavier use.
+    cobalt_enabled: bool = field(default_factory=lambda: os.getenv("COBALT_ENABLED", "1") != "0")
+    cobalt_api_url: str = field(
+        default_factory=lambda: os.getenv("COBALT_API_URL", "https://api.cobalt.tools").strip().rstrip("/"))
+    cobalt_api_key: str = field(default_factory=lambda: os.getenv("COBALT_API_KEY", "").strip())
+
+    # Self-maintaining free-proxy pool (TheSpeedX lists → YouTube-verified).
+    auto_proxy: bool = field(default_factory=lambda: os.getenv("AUTO_PROXY", "1") != "0")
+    proxy_refresh_minutes: int = field(
+        default_factory=lambda: max(5, _int_env("PROXY_REFRESH_MINUTES", 15)))
+    proxy_pool_size: int = field(default_factory=lambda: max(3, _int_env("PROXY_POOL_SIZE", 12)))
 
     debug_admin: bool = field(default_factory=lambda: os.getenv("DEBUG_ADMIN", "") == "1")
     port: int = field(default_factory=lambda: _int_env("PORT", 7860))

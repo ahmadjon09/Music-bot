@@ -14,9 +14,10 @@ from pathlib import Path
 # Noise we strip wherever it appears inside () or [] brackets.
 _NOISE = (
     r"official\s*(music\s*)?video|official\s*audio|official\s*lyric\w*|lyrics?|"
-    r"music\s*video|video\s*clip|official\s*mv|\bmv\b|hd|hq|4k|8k|1080p?|720p?|"
+    r"music\s*video|video\s*clip|official\s*(mv|clip)|\bmv\b|hd|hq|4k|8k|1080p?|720p?|"
     r"remaster(ed)?(\s*\d{4})?|audio|video|full\s*song|premiere|trailer|teaser|"
-    r"prod\.\s*by\s*[\w\s]+|dir\.\s*by\s*[\w\s]+"
+    r"visualizer|color\s*coded\s*lyrics?|премьера(\s+клипа)?|клип|видеоклип|"
+    r"premyera|rasmiy(\s+klip)?|prod\.\s*by\s*[\w\s]+|dir\.\s*by\s*[\w\s]+"
 )
 _BRACKET_NOISE_RE = re.compile(rf"[\(\[][^\)\]]*({_NOISE})[^\)\]]*[\)\]]", re.IGNORECASE)
 _EMPTY_BRACKETS_RE = re.compile(r"[\(\[]\s*[\)\]]")
@@ -25,6 +26,16 @@ _SUFFIX_RE = re.compile(
 )
 _WHITESPACE_RE = re.compile(r"\s{2,}")
 _DANGLING_RE = re.compile(r"[\s\-_–—|•·:]+$|^[\s\-_–—|•·:]+")
+# Unbracketed tails: "… Official Music Video", "… HD", "… Music Video".
+# Deliberately conservative — a song genuinely called "Video" survives,
+# because we only strip official/combo/quality phrases.
+_TRAILING_RES = (
+    re.compile(r"\s+official\s+(music\s+)?(video|audio|mv|clip|lyrics?\s*video)\s*$", re.IGNORECASE),
+    re.compile(r"\s+(music\s+video|lyrics?\s*video|премьера\s+клипа)\s*$", re.IGNORECASE),
+    re.compile(r"\s+(full\s*)?(hd|hq|4k|8k|2160p|1080p|720p)\s*$", re.IGNORECASE),
+)
+# Leading shouts: "Премьера клипа! Artist - Song", "PREMIERE: …"
+_LEADING_RE = re.compile(r"^(премьера(\s+клипа)?|premiere|premyera)[!:\s\-–—]*", re.IGNORECASE)
 
 
 def clean_title(raw: str) -> str:
@@ -32,10 +43,13 @@ def clean_title(raw: str) -> str:
     title = (raw or "").strip()
     if not title:
         return "Unknown title"
-    # Run twice: nested junk like "(Official Video) [HD]" peels off layer by layer.
-    for _ in range(2):
+    title = _LEADING_RE.sub("", title)
+    # Run a few times: nested junk like "(Official Video) [HD]" peels layer by layer.
+    for _ in range(3):
         title = _BRACKET_NOISE_RE.sub(" ", title)
         title = _SUFFIX_RE.sub("", title)
+        for pattern in _TRAILING_RES:
+            title = pattern.sub("", title)
     title = _EMPTY_BRACKETS_RE.sub(" ", title)
     title = _WHITESPACE_RE.sub(" ", title)
     title = _DANGLING_RE.sub("", title).strip()
@@ -71,6 +85,21 @@ def split_artist_title(info: dict) -> tuple[str, str]:
                 return left, right
             break
     return uploader or "Unknown artist", title
+
+
+_FILENAME_BAD_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
+
+
+def media_filename(title: str, performer: str, ext: str) -> str:
+    """Human-friendly download name, e.g. ``Rick Astley - Never Gonna….m4a``.
+
+    Telegram shows this as the saved file name when a user downloads the
+    track — a raw video id would be pure user-hostile.
+    """
+    base = f"{performer} - {title}" if performer and performer != "Unknown artist" else title
+    base = _WHITESPACE_RE.sub(" ", _FILENAME_BAD_RE.sub(" ", base)).strip(" .")
+    base = base[:90].rstrip(" .") or "track"
+    return f"{base}.{ext.lstrip('.').lower()}"
 
 
 def best_thumbnail(info: dict) -> str | None:

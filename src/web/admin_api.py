@@ -13,16 +13,21 @@ import shutil
 import time
 from pathlib import Path
 
-import aiohttp
 from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from collections.abc import Callable
+
+from aiogram import Bot
+
 from .. import __version__, security
+from ..bot.profile import apply_bot_profile, get_bot_profile, reset_bot_profile
 from ..bot.state import BOT_STARTED_AT, uptime_text
 from ..config import Settings, resolve_ffmpeg
 from ..db import Database
 from ..downloader import ytdlp_version
+from ..httputil import proxy_session
 from ..proxy import ProxyParseError, parse_proxy_list
 from ..runtime import Runtime
 
@@ -33,6 +38,10 @@ class ProxyBody(BaseModel):
     proxies: str
 
 
+class ProxyModeBody(BaseModel):
+    mode: str  # "auto" (free pool) | "manual" (admin proxies)
+
+
 class CookiesBody(BaseModel):
     content: str
 
@@ -41,7 +50,8 @@ class MaintenanceBody(BaseModel):
     enabled: bool
 
 
-def build_admin_router(settings: Settings, db: Database, runtime: Runtime) -> APIRouter:
+def build_admin_router(settings: Settings, db: Database, runtime: Runtime,
+                       bot_getter: Callable[[], Bot | None] | None = None) -> APIRouter:
     router = APIRouter()
 
     async def require_admin(
@@ -59,7 +69,8 @@ def build_admin_router(settings: Settings, db: Database, runtime: Runtime) -> AP
     async def admin_page() -> FileResponse:
         return FileResponse(_STATIC / "admin.html", media_type="text/html")
 
-    @router.get("/health", include_in_schema=False)
+    # Ping monitors (UptimeRobot & co.) often probe with HEAD — accept both.
+    @router.api_route("/health", methods=["GET", "HEAD"], include_in_schema=False)
     async def health() -> dict:
         return {"ok": True, "version": __version__, "uptime": uptime_text()}
 
@@ -87,6 +98,8 @@ def build_admin_router(settings: Settings, db: Database, runtime: Runtime) -> AP
             "maintenance": runtime.maintenance,
             "tmp_bytes": tmp_usage,
             "proxies": [p.masked for p in runtime.proxies],
+            "proxy_pool": runtime.pool_stats(),
+            "cobalt": {"enabled": settings.cobalt_enabled, "url": settings.cobalt_api_url},
             "cookies": {
                 "installed": runtime.has_global_cookies,
                 "total": cookies.get("total", 0),
@@ -109,6 +122,19 @@ def build_admin_router(settings: Settings, db: Database, runtime: Runtime) -> AP
         await runtime.clear_proxies()
         return {"ok": True}
 
+    @router.post("/api/admin/proxy/mode")
+    async def set_proxy_mode(body: ProxyModeBody, _: int = Depends(require_admin)) -> dict:
+        await runtime.set_proxy_mode(body.mode)
+        return {"ok": True, "proxy_pool": runtime.pool_stats()}
+
+    @router.post("/api/admin/proxy/pool/refresh")
+    async def refresh_pool(_: int = Depends(require_admin)) -> dict:
+        """Kick off a rescan of the free lists (runs in the background)."""
+        pool = runtime.pool
+        if pool is not None and not pool.refreshing:
+            asyncio.create_task(runtime.refresh_pool_now(), name="proxy-refresh")
+        return {"ok": True, "proxy_pool": runtime.pool_stats()}
+
     @router.post("/api/admin/proxy/test")
     async def test_proxy(body: ProxyBody, _: int = Depends(require_admin)) -> dict:
         """Try one request through the (first) candidate proxy."""
@@ -121,9 +147,8 @@ def build_admin_router(settings: Settings, db: Database, runtime: Runtime) -> AP
         proxy_url = pool[0].url
         started = time.monotonic()
         try:
-            timeout = aiohttp.ClientTimeout(total=15)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get("https://api.ipify.org?format=json", proxy=proxy_url) as resp:
+            async with proxy_session(proxy_url, timeout=15) as (session, req_proxy):
+                async with session.get("https://api.ipify.org?format=json", proxy=req_proxy) as resp:
                     data = await resp.json(content_type=None)
             return {"ok": True, "ip": data.get("ip", "?"),
                     "ms": int((time.monotonic() - started) * 1000)}
@@ -164,6 +189,26 @@ def build_admin_router(settings: Settings, db: Database, runtime: Runtime) -> AP
     async def clear_cache(_: int = Depends(require_admin)) -> dict:
         removed = await db.cache_clear()
         return {"ok": True, "removed": removed}
+
+    # ── bot identity: name / descriptions / commands ─────────────────────────
+    def _bot_or_503() -> Bot:
+        bot = bot_getter() if bot_getter else None
+        if bot is None:
+            raise HTTPException(status_code=503, detail="Bot is not running (no BOT_TOKEN?)")
+        return bot
+
+    @router.get("/api/admin/profile")
+    async def profile(_: int = Depends(require_admin)) -> dict:
+        return {"ok": True, "profile": await get_bot_profile(_bot_or_503())}
+
+    @router.post("/api/admin/profile/apply")
+    async def profile_apply(_: int = Depends(require_admin)) -> dict:
+        return {"ok": True, "applied": await apply_bot_profile(_bot_or_503())}
+
+    @router.post("/api/admin/profile/reset")
+    async def profile_reset(_: int = Depends(require_admin)) -> dict:
+        """Wipe every localized name/description/command, then re-apply fresh."""
+        return {"ok": True, **(await reset_bot_profile(_bot_or_503()))}
 
     @router.post("/api/admin/clear-tmp")
     async def clear_tmp(_: int = Depends(require_admin)) -> dict:
