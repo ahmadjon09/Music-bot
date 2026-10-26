@@ -3,9 +3,7 @@ name: Sync to Hugging Face Hub
 on:
   push:
     branches:
-      - main 
-
-
+      - main
   workflow_dispatch:
 
 jobs:
@@ -21,4 +19,4 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          git push https://ahmadjon09:$HF_TOKEN@huggingface.co/spaces/ahmadjon09/65d7c835be54c752 main
+          git push --force https://ahmadjon09:$HF_TOKEN@huggingface.co/spaces/ahmadjon09/65d7c835be54c752 main
