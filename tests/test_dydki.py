@@ -70,7 +70,7 @@ def test_dydki_search_results_are_cached_by_normalized_query(monkeypatch):
     calls = 0
     document = _card(title="Kosandra", artist="Miyagi", song_id="55")
 
-    async def fake_request(query, *, proxy):
+    async def fake_request(query):
         nonlocal calls
         calls += 1
         assert query == "Miyagi"

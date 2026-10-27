@@ -18,9 +18,11 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
+import aiohttp
+
 from .config import Settings
 from .downloader import MediaError, SearchResult, TooLargeError
-from .httputil import proxy_session
+from .httputil import USER_AGENT
 from .metadata import clean_title
 
 log = logging.getLogger("musicbot.dydki")
@@ -214,18 +216,6 @@ def parse_search_results(document: str, *, max_results: int = 30,
     return results
 
 
-def _proxy_attempts(proxy: str | list[str] | None) -> list[str | None]:
-    if isinstance(proxy, str):
-        candidates: list[str | None] = [proxy] if proxy else []
-    else:
-        candidates = list(proxy or [])
-    # A proxy pool is best-effort; a direct attempt gives Dydki a chance when
-    # every rotating exit is blocked or stale.
-    if None not in candidates:
-        candidates.append(None)
-    return candidates or [None]
-
-
 class DydkiClient:
     """Async search/download client with a bounded ten-minute query cache."""
 
@@ -233,7 +223,7 @@ class DydkiClient:
         self.settings = settings
         self._search_cache: OrderedDict[str, tuple[float, list[SearchResult]]] = OrderedDict()
 
-    async def search(self, query: str, *, proxy: str | list[str] | None = None) -> list[SearchResult]:
+    async def search(self, query: str) -> list[SearchResult]:
         normalized = " ".join((query or "").casefold().split())
         if not normalized:
             return []
@@ -246,7 +236,7 @@ class DydkiClient:
 
         try:
             document = await asyncio.wait_for(
-                self._request_search_page(query.strip(), proxy=proxy), timeout=30)
+                self._request_search_page(query.strip()), timeout=30)
         except TimeoutError as exc:
             raise DydkiError("Dydki search timed out") from exc
         results = parse_search_results(
@@ -261,73 +251,74 @@ class DydkiClient:
                 self._search_cache.popitem(last=False)
         return list(results)
 
-    async def _request_search_page(self, query: str, *, proxy: str | list[str] | None) -> str:
-        last_error: Exception | None = None
-        headers = {"Referer": BASE_URL, "Accept": "text/html,application/xhtml+xml"}
-        for candidate in _proxy_attempts(proxy):
-            try:
-                async with proxy_session(candidate, timeout=20, headers=headers) as (session, req_proxy):
-                    async with session.get(BASE_URL, params={"mp3": query}, proxy=req_proxy,
-                                           allow_redirects=True) as response:
-                        final_host = (urlsplit(str(response.url)).hostname or "").lower()
-                        if final_host not in {"dydki.net", "www.dydki.net"}:
-                            raise DydkiError("Dydki redirected outside its catalogue domain")
-                        if response.status >= 400:
-                            raise DydkiError(f"Dydki returned HTTP {response.status}")
-                        raw = await response.content.read(_MAX_HTML_BYTES + 1)
-                        if len(raw) > _MAX_HTML_BYTES:
-                            raise DydkiError("Dydki search page is too large")
-                        charset = response.charset or "utf-8"
-                        return raw.decode(charset, errors="replace")
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001 — rotate exits on network/site errors
-                last_error = exc
-        log.info("Dydki search failed for %r: %s", query, last_error)
-        raise DydkiError("Could not reach Dydki search") from last_error
+    async def _request_search_page(self, query: str) -> str:
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Referer": BASE_URL,
+            "Accept": "text/html,application/xhtml+xml",
+        }
+        try:
+            timeout = aiohttp.ClientTimeout(total=20)
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+                async with session.get(BASE_URL, params={"mp3": query}, allow_redirects=True) as response:
+                    final_host = (urlsplit(str(response.url)).hostname or "").lower()
+                    if final_host not in {"dydki.net", "www.dydki.net"}:
+                        raise DydkiError("Dydki redirected outside its catalogue domain")
+                    if response.status >= 400:
+                        raise DydkiError(f"Dydki returned HTTP {response.status}")
+                    raw = await response.content.read(_MAX_HTML_BYTES + 1)
+                    if len(raw) > _MAX_HTML_BYTES:
+                        raise DydkiError("Dydki search page is too large")
+                    charset = response.charset or "utf-8"
+                    return raw.decode(charset, errors="replace")
+        except asyncio.CancelledError:
+            raise
+        except DydkiError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — a direct network/site error
+            log.info("Dydki search failed for %r: %s", query, exc)
+            raise DydkiError("Could not reach Dydki search") from exc
 
-    async def download_audio(self, url: str, destination: Path, *,
-                             proxy: str | list[str] | None = None) -> Path:
+    async def download_audio(self, url: str, destination: Path) -> Path:
         """Download a Dydki stream only as fallback when Telegram URL import fails."""
         if not _valid_mp3_url(url):
             raise DydkiError("Refusing a non-Dydki MP3 URL")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        last_error: Exception | None = None
-        headers = {"Referer": BASE_URL, "Accept": "audio/mpeg,*/*;q=0.8"}
+        destination.unlink(missing_ok=True)
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Referer": BASE_URL,
+            "Accept": "audio/mpeg,*/*;q=0.8",
+        }
+        try:
+            timeout = aiohttp.ClientTimeout(total=90)
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+                async with session.get(url, allow_redirects=True, max_redirects=5) as response:
+                    if response.status >= 400:
+                        raise DydkiError(f"Dydki MP3 returned HTTP {response.status}")
+                    if not _valid_mp3_url(str(response.url)):
+                        raise DydkiError("Dydki MP3 redirected outside the media hosts")
+                    declared_size = response.content_length
+                    if declared_size is not None and declared_size > self.settings.max_filesize:
+                        raise TooLargeError("Dydki MP3 exceeds the configured size limit")
 
-        for candidate in _proxy_attempts(proxy):
+                    written = 0
+                    with destination.open("wb") as output:
+                        async for chunk in response.content.iter_chunked(_DOWNLOAD_CHUNK_SIZE):
+                            written += len(chunk)
+                            if written > self.settings.max_filesize:
+                                raise TooLargeError("Dydki MP3 exceeds the configured size limit")
+                            output.write(chunk)
+                    if written == 0:
+                        raise DydkiError("Dydki returned an empty MP3")
+                    return destination
+        except asyncio.CancelledError:
             destination.unlink(missing_ok=True)
-            try:
-                async with proxy_session(candidate, timeout=90, headers=headers) as (session, req_proxy):
-                    async with session.get(url, proxy=req_proxy, allow_redirects=True,
-                                           max_redirects=5) as response:
-                        if response.status >= 400:
-                            raise DydkiError(f"Dydki MP3 returned HTTP {response.status}")
-                        if not _valid_mp3_url(str(response.url)):
-                            raise DydkiError("Dydki MP3 redirected outside the media hosts")
-                        declared_size = response.content_length
-                        if declared_size is not None and declared_size > self.settings.max_filesize:
-                            raise TooLargeError("Dydki MP3 exceeds the configured size limit")
-
-                        written = 0
-                        with destination.open("wb") as output:
-                            async for chunk in response.content.iter_chunked(_DOWNLOAD_CHUNK_SIZE):
-                                written += len(chunk)
-                                if written > self.settings.max_filesize:
-                                    raise TooLargeError("Dydki MP3 exceeds the configured size limit")
-                                output.write(chunk)
-                        if written == 0:
-                            raise DydkiError("Dydki returned an empty MP3")
-                        return destination
-            except asyncio.CancelledError:
-                destination.unlink(missing_ok=True)
-                raise
-            except TooLargeError:
-                destination.unlink(missing_ok=True)
-                raise
-            except Exception as exc:  # noqa: BLE001 — rotate exits on media network errors
-                destination.unlink(missing_ok=True)
-                last_error = exc
-
-        log.info("Dydki MP3 fetch failed: %s", last_error)
-        raise DydkiError("Could not download the Dydki MP3 stream") from last_error
+            raise
+        except (DydkiError, TooLargeError):
+            destination.unlink(missing_ok=True)
+            raise
+        except Exception as exc:  # noqa: BLE001 — direct media network error
+            destination.unlink(missing_ok=True)
+            log.info("Dydki MP3 fetch failed: %s", exc)
+            raise DydkiError("Could not download the Dydki MP3 stream") from exc
