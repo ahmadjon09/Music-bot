@@ -20,7 +20,7 @@ license: mit
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](#license)
 
 Send the bot a **link**, a **song name**, or a **video** — it handles the rest:
-instant media downloads from 1000+ sites, paginated YouTube song search, and
+instant media downloads from 1000+ sites, paginated Dydki.net song search, and
 Shazam-powered music recognition. Async end-to-end, engineered to stay fast
 and lean on free-tier hardware (Hugging Face Spaces included).
 
@@ -33,7 +33,7 @@ re-architected as a modular, fully-async aiogram 3 application.
 |---|---|
 | 🔗 **Universal downloader** | YouTube, TikTok, Instagram, X/Twitter, Pinterest, Bluesky, SoundCloud + everything yt-dlp & gallery-dl support |
 | 🖼 **Carousel / album support** | Multi-item posts arrive as clean Telegram albums (chunked by 10, capped at 20) |
-| 🔍 **Song search** | Type a name → **20+ results under 10 minutes**, **10 per page**, inline pagination, one-tap MP3 — powered by YouTube's InnerTube API (**~0.5 s** instead of yt-dlp's 5–20 s), with a 10-minute query cache |
+| 🔍 **Song search** | Type a name → search Dydki.net for tracks (artist, duration and ready MP3 stream), **10 per page**, inline pagination, one-tap MP3, artist artwork and a persistent Telegram `file_id` cache |
 | ⚡ **Cobalt fast lane** | Instagram, TikTok, X, Pinterest, Facebook, Reddit, Vimeo… fetched via [Cobalt](https://cobalt.tools) in one POST (carousels included); yt-dlp stays on YouTube & audio duty, and doubles as the automatic fallback |
 | 🤖 **Self-maintaining proxy pool** | A background worker scans the public [TheSpeedX proxy lists](https://github.com/TheSpeedX/PROXY-List) top-down, keeps only proxies that **actually reach YouTube**, ranks them by latency and re-scans every 15 min — downloads rotate through the best exits and cool down dead ones automatically, no babysitting |
 | ⚡️ **Universal file_id cache** | **Everything** the bot sends (audio, video per quality, photos, whole carousels, extracted audio, Shazam results) is remembered in SQLite by Telegram `file_id`. Any URL spelling (`youtu.be/…`, Shorts, tracking params…) canonicalises to one key, checked *before* any network call — repeat requests are re-sent from Telegram's own servers in ~0s, for every user |
@@ -62,6 +62,8 @@ re-architected as a modular, fully-async aiogram 3 application.
 │  ├─ gallery.py      gallery-dl fallback for image-first posts                   │
 │  ├─ recognize.py    ffmpeg snippet → Shazam                                     │
 │  ├─ metadata.py     title cleanup · artist split · mutagen tags · cover art     │
+│  ├─ dydki.py        Dydki.net search cards · direct MP3 stream · query cache    │
+│  ├─ artwork.py      optional artist portraits for Telegram audio thumbnails    │
 │  ├─ proxy.py        forgiving multi-format proxy parser (see below)             │
 │  ├─ proxypool.py    self-maintaining free-proxy pool (YouTube-verified)         │
 │  ├─ cobalt.py       Cobalt API client — socials fast lane                       │
@@ -139,7 +141,7 @@ python app.py             # web on http://0.0.0.0:7860 + bot polling
 | Send a **link** | Original media (video/photo/carousel) + 🎵 MP3 button under videos |
 | `/audio <url>` | MP3/M4A with tags + cover art |
 | `/video <url>` | Force video download |
-| Type a **song name** | YouTube search, 10/page pagination, tap a number → MP3 |
+| Type a **song name** | Search Dydki.net, 10/page pagination, tap a number → MP3 |
 | `/search <name>` | Same search, explicitly |
 | Send a **video** (private chat) | 🎵 *Identify the song* / 🎧 *Extract audio* buttons |
 | Reply to a video with `/shazam` | Music recognition |
@@ -218,7 +220,7 @@ auto uses the robot pool and falls back to manual entries while warming up.
 Only public HTTPS download traffic ever goes through public proxies — never
 bot tokens or user data.
 
-## ⚡ Cobalt fast lane & InnerTube search
+## ⚡ Cobalt fast lane & Dydki music search
 
 **Social links** (Instagram, TikTok, X, Pinterest, Facebook, Reddit, Vimeo,
 Snapchat, Tumblr, Twitch clips, Bilibili…) go through
@@ -226,15 +228,17 @@ Snapchat, Tumblr, Twitch clips, Bilibili…) go through
 or tunneled file URLs, and carousels arrive as picker items that become
 Telegram albums. Any Cobalt miss falls back to yt-dlp, then gallery-dl —
 three engines deep before we give up. yt-dlp keeps everything YouTube and
-every audio/MP3 request. Default is the public `api.cobalt.tools` instance;
+explicit media-link audio requests. Default is the public `api.cobalt.tools` instance;
 for heavier use self-host (`docker compose --profile cobalt up -d`, then
 `COBALT_API_URL=http://cobalt:9000`).
 
-**Song search** talks to YouTube's internal **InnerTube** API (ANDROID
-client) directly: a single JSON call answers in ~0.3–1 s, paginates via
-continuation tokens until 20–30 sub-10-minute songs are collected, and is
-cached per query for 10 minutes. If InnerTube ever hiccups, classic yt-dlp
-`ytsearch` quietly takes over.
+**Song-name search** reads Dydki.net's server-rendered `div.chkd` results: it
+uses each card's `data-mp3` stream URL plus the listed artist and duration,
+then sends that MP3 directly through Telegram (with a local-fetch fallback).
+Search results are cached for 10 minutes; successfully sent tracks are cached
+persistently by Telegram `file_id`, and an optional Deezer lookup adds an
+artist portrait as the audio thumbnail. Shazam-recognized titles use the same
+Dydki search path. YouTube remains supported for ordinary media links.
 
 ## 🍪 Cookies
 
@@ -302,8 +306,9 @@ python -m pytest tests/ -v
 Covers the proxy parser (every vendor shape), title cleanup & artist splitting,
 i18n parity across all three languages, Web App HMAC validation, cookie
 encryption/validation, media-routing logic, the auto proxy pool (ranking,
-cooldowns, scan waves), Cobalt response shapes, InnerTube parsing, and
-downloader proxy rotation.
+cooldowns, scan waves), Cobalt response shapes, Dydki HTML parsing and
+query caching, artist artwork matching, InnerTube parsing, and downloader
+proxy rotation.
 
 ## 🙏 Credits
 

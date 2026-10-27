@@ -186,3 +186,34 @@ def fmt_duration(seconds: int | float | None) -> str:
     hours, rem = divmod(total, 3600)
     minutes, secs = divmod(rem, 60)
     return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
+
+
+def prepare_telegram_thumbnail(image_bytes: bytes, *, square: bool = False,
+                               max_size: int = 320, max_bytes: int = 200_000) -> bytes | None:
+    """Create a JPEG thumbnail within Telegram's 320px / 200 KB limits."""
+    try:
+        import io
+
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        if square:
+            side = min(img.size)
+            x, y = (img.width - side) // 2, (img.height - side) // 2
+            img = img.crop((x, y, x + side, y + side))
+        img.thumbnail((max_size, max_size))
+        for quality in (88, 78, 68, 58, 48, 38):
+            out = io.BytesIO()
+            img.save(out, format="JPEG", quality=quality, optimize=True)
+            data = out.getvalue()
+            if len(data) <= max_bytes:
+                return data
+        # Rare noisy photos can still exceed the cap at low quality. Shrink
+        # once more rather than making Telegram reject an otherwise good song.
+        img.thumbnail((max(1, max_size // 2), max(1, max_size // 2)))
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=55, optimize=True)
+        data = out.getvalue()
+        return data if len(data) <= max_bytes else None
+    except Exception:  # noqa: BLE001 — a missing cover must never block media
+        return None

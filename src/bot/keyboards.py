@@ -112,7 +112,7 @@ def incoming_video_kb(lang: str, token: str) -> InlineKeyboardMarkup:
 def recognized_kb(lang: str, token: str, shazam_url: str | None) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text=t(lang, "btn_mp3"), callback_data=f"recmp3:{token}")
-    kb.button(text=t(lang, "btn_search_youtube"), callback_data=f"recsearch:{token}")
+    kb.button(text=t(lang, "btn_search_music"), callback_data=f"recsearch:{token}")
     if shazam_url:
         kb.button(text="🔗 Shazam", url=shazam_url)
     kb.adjust(2, 1)

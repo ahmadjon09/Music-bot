@@ -168,6 +168,11 @@ class SearchResult:
     duration: int
     url: str
     thumbnail: str | None = None
+    # Text search currently uses Dydki's direct MP3 stream; keep a source tag
+    # so existing YouTube results can still use the normal yt-dlp pipeline.
+    source: str = "youtube"
+    page_url: str | None = None
+    artist_url: str | None = None
 
 
 @dataclass
