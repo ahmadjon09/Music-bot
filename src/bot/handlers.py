@@ -17,6 +17,7 @@ import tempfile
 from pathlib import Path
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     CallbackQuery,
@@ -27,22 +28,45 @@ from aiogram.types import (
 )
 
 from .. import __version__, security
-from ..cache import (all_keys, audio_key, canonicalize_url, extractor_key,
-                     photo_key, upload_audio_key, video_key)
+from ..artwork import ArtistArtworkClient
+from ..cache import (
+    all_keys,
+    audio_key,
+    canonicalize_url,
+    extractor_key,
+    photo_key,
+    upload_audio_key,
+    video_key,
+)
 from ..cobalt import CobaltClient, is_cobalt_url
 from ..config import Settings
 from ..db import Database
-from ..downloader import Downloader, MediaError, Progress, ytdlp_version
+from ..downloader import Downloader, MediaError, Progress, SearchResult, ytdlp_version
+from ..dydki import DydkiClient, DydkiError
 from ..gallery import fetch_gallery
 from ..httputil import proxy_session
 from ..i18n import LANGS, normalize_lang, t
-from ..metadata import audio_duration, fmt_duration, media_filename, prepare_cover, tag_audio
+from ..metadata import (
+    audio_duration,
+    fmt_duration,
+    media_filename,
+    prepare_cover,
+    prepare_telegram_thumbnail,
+    tag_audio,
+)
 from ..proxy import ProxyParseError
 from ..recognize import RecognizedTrack, recognize_file
 from ..runtime import Runtime
 from . import keyboards as kb
 from .profile import reset_bot_profile
-from .state import DownloadGate, SearchStore, TokenRegistry, progress_bar, spinner_frame, uptime_text
+from .state import (
+    DownloadGate,
+    SearchStore,
+    TokenRegistry,
+    progress_bar,
+    spinner_frame,
+    uptime_text,
+)
 
 log = logging.getLogger("musicbot.handlers")
 
@@ -55,6 +79,8 @@ class Deps:
     db: Database
     runtime: Runtime
     downloader: Downloader
+    dydki: DydkiClient
+    artwork: ArtistArtworkClient
     cobalt: CobaltClient
     gate: DownloadGate
     searches = SearchStore()
@@ -63,6 +89,8 @@ class Deps:
 
 def init_deps(settings: Settings, db: Database, runtime: Runtime, downloader: Downloader) -> None:
     Deps.settings, Deps.db, Deps.runtime, Deps.downloader = settings, db, runtime, downloader
+    Deps.dydki = DydkiClient(settings)
+    Deps.artwork = ArtistArtworkClient()
     Deps.cobalt = CobaltClient(settings)
     Deps.gate = DownloadGate(settings.max_global_downloads, settings.max_user_downloads)
 
@@ -128,29 +156,56 @@ def _job_dir() -> Path:
     return Path(tempfile.mkdtemp(dir=Deps.settings.tmp_dir, prefix="job_"))
 
 
-async def _fetch_bytes(url: str | None, proxy: str | None = None) -> bytes | None:
+async def _fetch_bytes(url: str | None, proxy: str | None = None, *,
+                       max_bytes: int = 4 * 1024 * 1024) -> bytes | None:
     if not url:
         return None
     try:
         async with proxy_session(proxy, timeout=20) as (session, req_proxy):
             async with session.get(url, proxy=req_proxy) as resp:
-                if resp.status == 200:
-                    return await resp.read()
+                if resp.status != 200 or (resp.content_length and resp.content_length > max_bytes):
+                    return None
+                raw = await resp.content.read(max_bytes + 1)
+                return raw if len(raw) <= max_bytes else None
     except Exception:  # noqa: BLE001 — thumbnails are decoration, not cargo
         return None
-    return None
 
 
 async def _thumb_file(url: str | None, job: Path, proxy: str | None) -> FSInputFile | None:
     raw = await _fetch_bytes(url, proxy)
     if not raw:
         return None
-    jpeg = await asyncio.to_thread(prepare_cover, raw, square=False, max_size=480)
+    jpeg = await asyncio.to_thread(prepare_telegram_thumbnail, raw, square=False)
     if not jpeg:
         return None
     path = job / "thumb.jpg"
     path.write_bytes(jpeg)
     return FSInputFile(str(path))
+
+
+async def _artist_audio_thumb(result: SearchResult, job: Path,
+                              proxies: list[str]) -> tuple[FSInputFile | None, bytes | None]:
+    """Build a Telegram-sized artist thumbnail, with Dydki image → Deezer fallback."""
+    proxy = proxies[0] if proxies else None
+
+    async def _load_artwork() -> bytes | None:
+        raw_image = await _fetch_bytes(result.thumbnail, proxy) if result.thumbnail else None
+        if not raw_image:
+            raw_image = await Deps.artwork.get_image(result.uploader, proxy=proxies)
+        return raw_image
+
+    try:
+        raw = await asyncio.wait_for(_load_artwork(), timeout=8)
+    except TimeoutError:
+        raw = None  # optional artwork should never hold up the MP3 delivery
+    if not raw:
+        return None, None
+    jpeg = await asyncio.to_thread(prepare_telegram_thumbnail, raw, square=True)
+    if not jpeg:
+        return None, None
+    path = job / "artist-thumbnail.jpg"
+    path.write_bytes(jpeg)
+    return FSInputFile(str(path)), jpeg
 
 
 # ── /start, /help, navigation ────────────────────────────────────────────────
@@ -514,10 +569,12 @@ async def deliver_audio(message: Message, downloaded, job: Path, *, lang: str,
     await asyncio.to_thread(tag_audio, downloaded.path, downloaded.title, downloaded.performer, cover)
     duration = downloaded.duration or await asyncio.to_thread(audio_duration, downloaded.path)
     thumb = None
-    if cover:
-        thumb_path = job / "cover.jpg"
-        thumb_path.write_bytes(cover)
-        thumb = FSInputFile(str(thumb_path))
+    if raw_cover:
+        thumb_jpeg = await asyncio.to_thread(prepare_telegram_thumbnail, raw_cover, square=True)
+        if thumb_jpeg:
+            thumb_path = job / "cover-thumbnail.jpg"
+            thumb_path.write_bytes(thumb_jpeg)
+            thumb = FSInputFile(str(thumb_path))
     await status.set("uploading")
     sent = await message.answer_audio(
         FSInputFile(str(downloaded.path),
@@ -792,14 +849,87 @@ async def on_mp3_button(call: CallbackQuery) -> None:
     await process_url(msg, str(url), lang=lang, user=user, force="audio", actor_id=call.from_user.id)
 
 
-# ── YouTube text search ──────────────────────────────────────────────────────
+async def send_dydki_result(message: Message, result: SearchResult, *, lang: str,
+                            user_id: int) -> None:
+    """Send a Dydki MP3 stream directly, with Telegram file-id caching."""
+    canonical = f"dydki:{result.id}"
+    key = audio_key(canonical)
+    hit = await Deps.db.cache_get(key)
+    if hit:
+        try:
+            await message.answer_audio(hit["file_id"])
+            await Deps.db.bump_downloads(user_id)
+            await Deps.db.log_download(user_id, result.page_url or result.url,
+                                       "audio⚡cache", hit.get("title") or result.title)
+            return
+        except Exception:  # noqa: BLE001 — stale file_id: forget it and send again
+            await Deps.db.cache_delete(key)
+
+    status_msg = await message.answer(t(lang, "downloading_simple", spinner=spinner_frame()))
+    status = StatusMessage(status_msg, lang)
+    job: Path | None = None
+    cover: bytes | None = None
+    try:
+        job = _job_dir()
+        proxies = Deps.runtime.proxy_candidates(3)
+        thumbnail, cover = await _artist_audio_thumb(result, job, proxies)
+        await status.set("uploading")
+        audio_fields = {
+            "title": result.title[:64],
+            "performer": (result.uploader or "")[:64] or None,
+            "duration": result.duration or None,
+            "thumbnail": thumbnail,
+        }
+        try:
+            # The stream URL is already present in the Dydki HTML; let Telegram
+            # import it directly instead of asking yt-dlp to search/download it.
+            sent = await message.answer_audio(result.url, **audio_fields)
+        except TelegramBadRequest as exc:
+            # A few stream/CDN URLs reject Telegram's server-side import. Fetch
+            # that same Dydki URL once and upload it as a normal MP3 instead.
+            log.info("Telegram could not import Dydki stream directly: %s", exc)
+            audio_path = await Deps.dydki.download_audio(
+                result.url, job / "dydki-track.mp3", proxy=proxies)
+            await asyncio.to_thread(tag_audio, audio_path, result.title, result.uploader, cover)
+            sent = await message.answer_audio(
+                FSInputFile(str(audio_path),
+                            filename=media_filename(result.title, result.uploader, ".mp3")),
+                **audio_fields,
+            )
+
+        if not sent.audio:
+            raise DydkiError("Telegram did not return an audio file")
+        await Deps.db.cache_put(key, sent.audio.file_id, "audio", result.title,
+                                result.uploader, result.duration)
+        await _remember([canonical], "audio")
+        await _after_delivery(message, status, user_id, result.page_url or result.url,
+                              "audio", result.title)
+    except MediaError as exc:
+        log.info("Dydki track delivery failed for %s: %s", result.id, exc)
+        with contextlib.suppress(Exception):
+            await status_msg.edit_text(t(lang, exc.i18n_key))
+        await Deps.db.log_download(user_id, result.page_url or result.url,
+                                   "audio", result.title, status="error")
+    except Exception:  # noqa: BLE001 — a failed art/stream must not break the bot
+        log.exception("Dydki track delivery failed for %s", result.id)
+        with contextlib.suppress(Exception):
+            await status_msg.edit_text(t(lang, "error_generic"))
+        await Deps.db.log_download(user_id, result.page_url or result.url,
+                                   "audio", result.title, status="error")
+    finally:
+        if job:
+            shutil.rmtree(job, ignore_errors=True)
+
+
+# ── Dydki text search ────────────────────────────────────────────────────────
 def _search_page_text(lang: str, query: str, results, page: int, page_size: int) -> str:
     pages = max(1, math.ceil(len(results) / page_size))
     start = page * page_size
     lines = [t(lang, "search_results", query=_esc(query), total=len(results),
                page=page + 1, pages=pages), ""]
     for offset, item in enumerate(results[start:start + page_size]):
-        lines.append(f"<b>{start + offset + 1}.</b> {_esc(item.title)} "
+        artist = f"{_esc(item.uploader)} — " if item.uploader else ""
+        lines.append(f"<b>{start + offset + 1}.</b> {artist}{_esc(item.title)} "
                      f"· <code>{fmt_duration(item.duration)}</code>")
     return "\n".join(lines)
 
@@ -808,10 +938,10 @@ async def run_search(message: Message, query: str, *, lang: str, user_id: int,
                      origin: Message | None = None) -> None:
     status_msg = origin or await message.answer(
         t(lang, "searching", spinner=spinner_frame(), query=_esc(query)))
-    status = StatusMessage(status_msg, lang)
     try:
-        async with Deps.runtime.ytdlp_context(user_id) as (cookiefile, proxies):
-            results = await Deps.downloader.search(query, cookiefile=cookiefile, proxy=proxies)
+        # Song names (and Shazam-recognized tracks) use Dydki's MP3 catalogue,
+        # not YouTube search. YouTube remains available for ordinary media URLs.
+        results = await Deps.dydki.search(query, proxy=Deps.runtime.proxy_candidates(3))
     except MediaError as exc:
         with contextlib.suppress(Exception):
             await status_msg.edit_text(t(lang, exc.i18n_key))
@@ -881,7 +1011,11 @@ async def on_pick(call: CallbackQuery) -> None:
     assert isinstance(msg, Message)
     with contextlib.suppress(Exception):
         await msg.delete()
-    await process_url(msg, chosen.url, lang=lang, user=user, force="audio", actor_id=call.from_user.id)
+    if chosen.source == "dydki":
+        await send_dydki_result(msg, chosen, lang=lang, user_id=call.from_user.id)
+    else:
+        await process_url(msg, chosen.url, lang=lang, user=user, force="audio",
+                          actor_id=call.from_user.id)
 
 
 # ── music recognition (Shazam) ───────────────────────────────────────────────
@@ -1035,7 +1169,7 @@ async def on_video_audio(call: CallbackQuery, bot: Bot) -> None:
 @router.callback_query(F.data.startswith("recmp3:"))
 async def on_rec_mp3(call: CallbackQuery) -> None:
     assert call.from_user and call.data and call.message
-    lang, user = await _lang(call.from_user.id, call.from_user.language_code)
+    lang, _ = await _lang(call.from_user.id, call.from_user.language_code)
     query = Deps.tokens.get(call.data.split(":", 1)[1])
     await call.answer()
     msg = call.message
@@ -1043,14 +1177,14 @@ async def on_rec_mp3(call: CallbackQuery) -> None:
     if not query:
         await msg.answer(t(lang, "search_expired"))
         return
-    # Search, grab the top hit, deliver it as MP3 — musical telepathy, basically.
+    # Search the recognized artist/title in Dydki, then send its MP3 stream.
     try:
-        async with Deps.runtime.ytdlp_context(call.from_user.id) as (cookiefile, proxies):
-            results = await Deps.downloader.search(str(query), cookiefile=cookiefile, proxy=proxies)
+        results = await Deps.dydki.search(
+            str(query), proxy=Deps.runtime.proxy_candidates(3))
     except MediaError:
         results = []
     if results:
-        await process_url(msg, results[0].url, lang=lang, user=user, force="audio", actor_id=call.from_user.id)
+        await send_dydki_result(msg, results[0], lang=lang, user_id=call.from_user.id)
     else:
         await msg.answer(t(lang, "search_empty"))
 

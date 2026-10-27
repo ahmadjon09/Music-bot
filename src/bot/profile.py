@@ -29,16 +29,16 @@ NAME_LIMIT, DESCRIPTION_LIMIT, SHORT_LIMIT = 64, 512, 120
 BOT_NAME = "Music Finder"
 
 _SHORT: dict[str, str] = {
-    "en": "Download music & videos from YouTube, TikTok, Instagram and 1000+ sites. Search songs, recognize tracks 🎧",
-    "uz": "YouTube, TikTok, Instagram va 1000+ saytdan musiqa va video yuklang. Qo'shiq qidiring, trekni aniqlang 🎧",
-    "ru": "Скачивайте музыку и видео с YouTube, TikTok, Instagram и 1000+ сайтов. Поиск песен и распознавание треков 🎧",
+    "en": "Download media from YouTube, TikTok, Instagram and 1000+ sites. Search songs on Dydki.net, recognize tracks 🎧",
+    "uz": "YouTube, TikTok, Instagram va 1000+ saytdan video/rasm yuklang. Dydki.net'dan qo'shiq qidiring, trekni aniqlang 🎧",
+    "ru": "Скачивайте медиа с YouTube, TikTok, Instagram и 1000+ сайтов. Ищите песни на Dydki.net и распознавайте треки 🎧",
 }
 
 _DESCRIPTION: dict[str, str] = {
     "en": (
         "🎧 Music Finder downloads media and finds songs for you.\n\n"
         "🔗 Send a link — YouTube, TikTok, Instagram, X, Pinterest & 1000+ sites\n"
-        "🔍 Send a song name — YouTube search, tap a number, get the MP3\n"
+        "🔍 Send a song name — Dydki.net search, tap a number, get the MP3\n"
         "🎬 Send a video — I'll name the background track (Shazam)\n\n"
         "⚡️ Cached instant delivery, clean titles, proper cover art.\n"
         "Press START and send your first link!"
@@ -46,7 +46,7 @@ _DESCRIPTION: dict[str, str] = {
     "uz": (
         "🎧 Music Finder — media yuklab beradi va qoʻshiqlarni topadi.\n\n"
         "🔗 Havola yuboring — YouTube, TikTok, Instagram, X, Pinterest va 1000+ sayt\n"
-        "🔍 Qoʻshiq nomini yozing — YouTube’dan topaman, raqamni bossangiz MP3 keladi\n"
+        "🔍 Qoʻshiq nomini yozing — Dydki.net'dan topaman, raqamni bossangiz MP3 keladi\n"
         "🎬 Video yuboring — fonidagi trekni aniqlayman (Shazam)\n\n"
         "⚡️ Tezkor kesh, toza sarlavhalar, sifatli muqovalar.\n"
         "START bosing va birinchi havolangizni yuboring!"
@@ -54,7 +54,7 @@ _DESCRIPTION: dict[str, str] = {
     "ru": (
         "🎧 Music Finder скачивает медиа и находит песни за секунды.\n\n"
         "🔗 Отправьте ссылку — YouTube, TikTok, Instagram, X, Pinterest и 1000+ сайтов\n"
-        "🔍 Напишите название песни — найду на YouTube, нажмите номер и получите MP3\n"
+        "🔍 Напишите название песни — найду на Dydki.net, нажмите номер и получите MP3\n"
         "🎬 Отправьте видео — распознаю фоновый трек (Shazam)\n\n"
         "⚡️ Мгновенная доставка из кэша, чистые названия, обложки.\n"
         "Нажмите START и отправьте первую ссылку!"
@@ -66,7 +66,7 @@ COMMANDS: dict[str | None, list[tuple[str, str]]] = {
         ("start", "Start the bot"),
         ("audio", "Download MP3 from a link"),
         ("video", "Download video from a link"),
-        ("search", "Search a song on YouTube"),
+        ("search", "Search songs on Dydki.net"),
         ("shazam", "Identify music (reply to a video)"),
         ("settings", "Language & quality settings"),
         ("cookies", "Manage your cookies"),
@@ -78,7 +78,7 @@ COMMANDS: dict[str | None, list[tuple[str, str]]] = {
         ("start", "Botni boshlash"),
         ("audio", "Havoladan MP3 yuklash"),
         ("video", "Havoladan video yuklash"),
-        ("search", "YouTube'da qo'shiq qidirish"),
+        ("search", "Dydki.net'dan qo'shiq qidirish"),
         ("shazam", "Videodagi musiqani aniqlash"),
         ("settings", "Til va sifat sozlamalari"),
         ("cookies", "Cookies boshqaruvi"),
@@ -89,7 +89,7 @@ COMMANDS: dict[str | None, list[tuple[str, str]]] = {
         ("start", "Запустить бота"),
         ("audio", "Скачать MP3 по ссылке"),
         ("video", "Скачать видео по ссылке"),
-        ("search", "Найти песню на YouTube"),
+        ("search", "Найти песню на Dydki.net"),
         ("shazam", "Распознать музыку в видео"),
         ("settings", "Язык и качество"),
         ("cookies", "Управление cookies"),

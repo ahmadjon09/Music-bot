@@ -1,4 +1,9 @@
-from src.metadata import clean_title, media_filename, split_artist_title
+from src.metadata import (
+    clean_title,
+    media_filename,
+    prepare_telegram_thumbnail,
+    split_artist_title,
+)
 
 
 def test_clean_title_strips_youtube_noise():
@@ -42,6 +47,20 @@ def test_clean_title_strips_unbracketed_tails():
 def test_clean_title_strips_premiere_shouts():
     assert clean_title("Премьера клипа! Artist - Song") == "Artist - Song"
     assert clean_title("Artist - Track [Премьера клипа, 2024]") == "Artist - Track"
+
+
+def test_telegram_thumbnail_obeys_bot_api_limits():
+    import io
+
+    from PIL import Image
+
+    source = io.BytesIO()
+    Image.new("RGB", (1200, 800), "navy").save(source, format="PNG")
+    thumbnail = prepare_telegram_thumbnail(source.getvalue(), square=True)
+    assert thumbnail and len(thumbnail) <= 200_000
+    image = Image.open(io.BytesIO(thumbnail))
+    assert image.format == "JPEG"
+    assert image.size == (320, 320)
 
 
 def test_media_filename_is_human_friendly():

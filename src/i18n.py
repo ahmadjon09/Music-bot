@@ -15,7 +15,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "start_body": (
             " menga shunchaki yuboring:\n\n"
             "🔗 <b>Havola</b> — YouTube, TikTok, Instagram, X, Pinterest va 1000+ saytdan video/rasm yuklab beraman\n"
-            "🔍 <b>Qo'shiq nomi</b> — yozing, YouTube'dan topib beraman\n"
+            "🔍 <b>Qo'shiq nomi</b> — yozing, Dydki.net'dan topib beraman\n"
             "🎬 <b>Video</b> — ichidagi qo'shiqni Shazam bilan aniqlayman\n\n"
             "<i>Tez. Bepul. Reklamasiz.</i> ⚡️"
         ),
@@ -30,11 +30,11 @@ _STRINGS: dict[str, dict[str, str]] = {
         "btn_shazam": "🎵 Qo'shiqni aniqlash",
         "btn_audio_from_video": "🎧 Audiosini olish",
         "btn_download": "⬇️ Yuklab olish",
-        "btn_search_youtube": "🔍 YouTube'da qidirish",
+        "btn_search_music": "🔍 Dydki.net'dan qidirish",
         "help_text": (
             "📖 <b>Yordam</b>\n\n"
             "🔗 <b>Havola yuboring</b> — video, rasm yoki karuselni yuklab beraman.\n"
-            "🔍 <b>Nom yozing</b> — qo'shiqni qidiraman (10 daqiqadan qisqa, 20+ natija).\n"
+            "🔍 <b>Nom yozing</b> — Dydki.net katalogidan qo'shiq qidiraman (10 daqiqadan qisqa, 20+ natija).\n"
             "🎬 <b>Video yuboring</b> — fon musiqasini aniqlayman.\n\n"
             "<b>Komandalar:</b>\n"
             "/audio &lt;havola&gt; — faqat MP3 olish\n"
@@ -133,7 +133,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "start_body": (
             "Просто отправьте мне:\n\n"
             "🔗 <b>Ссылку</b> — скачаю видео/фото с YouTube, TikTok, Instagram, X, Pinterest и 1000+ сайтов\n"
-            "🔍 <b>Название песни</b> — найду её на YouTube\n"
+            "🔍 <b>Название песни</b> — найду её в каталоге Dydki.net\n"
             "🎬 <b>Видео</b> — распознаю фоновую музыку через Shazam\n\n"
             "<i>Быстро. Бесплатно. Без рекламы.</i> ⚡️"
         ),
@@ -148,11 +148,11 @@ _STRINGS: dict[str, dict[str, str]] = {
         "btn_shazam": "🎵 Распознать песню",
         "btn_audio_from_video": "🎧 Извлечь аудио",
         "btn_download": "⬇️ Скачать",
-        "btn_search_youtube": "🔍 Искать на YouTube",
+        "btn_search_music": "🔍 Искать в каталоге Dydki.net",
         "help_text": (
             "📖 <b>Помощь</b>\n\n"
             "🔗 <b>Отправьте ссылку</b> — скачаю видео, фото или карусель.\n"
-            "🔍 <b>Напишите название</b> — найду песню (до 10 минут, 20+ результатов).\n"
+            "🔍 <b>Напишите название</b> — найду песню в каталоге Dydki.net (до 10 минут, 20+ результатов).\n"
             "🎬 <b>Отправьте видео</b> — распознаю фоновую музыку.\n\n"
             "<b>Команды:</b>\n"
             "/audio &lt;ссылка&gt; — только MP3\n"
@@ -251,7 +251,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "start_body": (
             "Just send me:\n\n"
             "🔗 <b>A link</b> — I'll fetch video/photos from YouTube, TikTok, Instagram, X, Pinterest &amp; 1000+ sites\n"
-            "🔍 <b>A song name</b> — I'll find it on YouTube\n"
+            "🔍 <b>A song name</b> — I'll search the Dydki.net catalogue\n"
             "🎬 <b>A video</b> — I'll identify the background track with Shazam\n\n"
             "<i>Fast. Free. No ads.</i> ⚡️"
         ),
@@ -266,11 +266,11 @@ _STRINGS: dict[str, dict[str, str]] = {
         "btn_shazam": "🎵 Identify the song",
         "btn_audio_from_video": "🎧 Extract audio",
         "btn_download": "⬇️ Download",
-        "btn_search_youtube": "🔍 Search on YouTube",
+        "btn_search_music": "🔍 Search Dydki.net",
         "help_text": (
             "📖 <b>Help</b>\n\n"
             "🔗 <b>Send a link</b> — video, photo or carousel, delivered instantly.\n"
-            "🔍 <b>Type a name</b> — song search (under 10 min, 20+ results).\n"
+            "🔍 <b>Type a name</b> — search the Dydki.net catalogue (under 10 min, 20+ results).\n"
             "🎬 <b>Send a video</b> — I'll name the background track.\n\n"
             "<b>Commands:</b>\n"
             "/audio &lt;url&gt; — MP3 only\n"
