@@ -16,7 +16,9 @@ from collections import OrderedDict
 from difflib import SequenceMatcher
 from urllib.parse import urlsplit
 
-from .httputil import proxy_session
+import aiohttp
+
+from .httputil import USER_AGENT
 from .metadata import prepare_cover
 
 log = logging.getLogger("musicbot.artwork")
@@ -72,23 +74,13 @@ def _artist_image_url(artist: str, payload: object) -> str | None:
     return image if score >= 0.68 else None
 
 
-def _proxy_attempts(proxy: str | list[str] | None) -> list[str | None]:
-    if isinstance(proxy, str):
-        candidates: list[str | None] = [proxy] if proxy else []
-    else:
-        candidates = list(proxy or [])
-    if None not in candidates:
-        candidates.append(None)
-    return candidates or [None]
-
-
 class ArtistArtworkClient:
     """Fetches compact JPEG portraits and keeps a small in-memory cache."""
 
     def __init__(self) -> None:
         self._cache: OrderedDict[str, tuple[float, bytes | None]] = OrderedDict()
 
-    async def get_image(self, artist: str, *, proxy: str | list[str] | None = None) -> bytes | None:
+    async def get_image(self, artist: str) -> bytes | None:
         key = _normalise_name(artist)
         if not key:
             return None
@@ -101,39 +93,39 @@ class ArtistArtworkClient:
                 return image
             self._cache.pop(key, None)
 
-        image = await self._load_image(artist.strip(), proxy=proxy)
+        image = await self._load_image(artist.strip())
         self._cache[key] = (time.monotonic(), image)
         self._cache.move_to_end(key)
         while len(self._cache) > _CACHE_SIZE:
             self._cache.popitem(last=False)
         return image
 
-    async def _load_image(self, artist: str, *, proxy: str | list[str] | None) -> bytes | None:
-        headers = {"Accept": "application/json,image/*;q=0.8"}
-        for candidate in _proxy_attempts(proxy):
-            try:
-                async with proxy_session(candidate, timeout=12, headers=headers) as (session, req_proxy):
-                    async with session.get(_DEEZER_SEARCH_URL, params={"q": artist},
-                                           proxy=req_proxy) as response:
-                        if response.status != 200:
-                            continue
-                        payload = await response.json(content_type=None)
-                        image_url = _artist_image_url(artist, payload)
-                        if not image_url:
-                            continue
-                        image = await self._download_image(image_url, proxy=candidate)
-                        if image:
-                            return image
-            except asyncio.CancelledError:
-                raise
-            except Exception:  # noqa: BLE001 — art is decoration, not a song dependency
-                log.debug("artist image lookup failed for %r", artist, exc_info=True)
-        return None
-
-    async def _download_image(self, url: str, *, proxy: str | None) -> bytes | None:
+    async def _load_image(self, artist: str) -> bytes | None:
+        headers = {"User-Agent": USER_AGENT, "Accept": "application/json,image/*;q=0.8"}
         try:
-            async with proxy_session(proxy, timeout=12, headers={"Accept": "image/*"}) as (session, req_proxy):
-                async with session.get(url, proxy=req_proxy, allow_redirects=True) as response:
+            timeout = aiohttp.ClientTimeout(total=12)
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+                async with session.get(_DEEZER_SEARCH_URL, params={"q": artist}) as response:
+                    if response.status != 200:
+                        return None
+                    payload = await response.json(content_type=None)
+                    image_url = _artist_image_url(artist, payload)
+                    if not image_url:
+                        return None
+                    return await self._download_image(image_url)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — art is decoration, not a song dependency
+            log.debug("artist image lookup failed for %r", artist, exc_info=True)
+            return None
+
+    async def _download_image(self, url: str) -> bytes | None:
+        try:
+            timeout = aiohttp.ClientTimeout(total=12)
+            async with aiohttp.ClientSession(
+                    timeout=timeout,
+                    headers={"User-Agent": USER_AGENT, "Accept": "image/*"}) as session:
+                async with session.get(url, allow_redirects=True) as response:
                     if response.status != 200:
                         return None
                     host = (urlsplit(str(response.url)).hostname or "").lower()

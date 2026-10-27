@@ -16,6 +16,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
+import aiohttp
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
@@ -44,7 +45,7 @@ from ..db import Database
 from ..downloader import Downloader, MediaError, Progress, SearchResult, ytdlp_version
 from ..dydki import DydkiClient, DydkiError
 from ..gallery import fetch_gallery
-from ..httputil import proxy_session
+from ..httputil import USER_AGENT, proxy_session
 from ..i18n import LANGS, normalize_lang, t
 from ..metadata import (
     audio_duration,
@@ -171,6 +172,26 @@ async def _fetch_bytes(url: str | None, proxy: str | None = None, *,
         return None
 
 
+async def _fetch_bytes_direct(
+    url: str | None, *, max_bytes: int = 4 * 1024 * 1024
+) -> bytes | None:
+    """Fetch optional Dydki artwork directly, without entering the proxy stack."""
+    if not url:
+        return None
+    try:
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(
+                timeout=timeout, headers={"User-Agent": USER_AGENT}) as session:
+            async with session.get(url) as response:
+                if response.status != 200 or (
+                        response.content_length and response.content_length > max_bytes):
+                    return None
+                raw = await response.content.read(max_bytes + 1)
+                return raw if len(raw) <= max_bytes else None
+    except Exception:  # noqa: BLE001 — thumbnails are decoration, not cargo
+        return None
+
+
 async def _thumb_file(url: str | None, job: Path, proxy: str | None) -> FSInputFile | None:
     raw = await _fetch_bytes(url, proxy)
     if not raw:
@@ -183,15 +204,14 @@ async def _thumb_file(url: str | None, job: Path, proxy: str | None) -> FSInputF
     return FSInputFile(str(path))
 
 
-async def _artist_audio_thumb(result: SearchResult, job: Path,
-                              proxies: list[str]) -> tuple[FSInputFile | None, bytes | None]:
+async def _artist_audio_thumb(
+    result: SearchResult, job: Path
+) -> tuple[FSInputFile | None, bytes | None]:
     """Build a Telegram-sized artist thumbnail, with Dydki image → Deezer fallback."""
-    proxy = proxies[0] if proxies else None
-
     async def _load_artwork() -> bytes | None:
-        raw_image = await _fetch_bytes(result.thumbnail, proxy) if result.thumbnail else None
+        raw_image = await _fetch_bytes_direct(result.thumbnail)
         if not raw_image:
-            raw_image = await Deps.artwork.get_image(result.uploader, proxy=proxies)
+            raw_image = await Deps.artwork.get_image(result.uploader)
         return raw_image
 
     try:
@@ -871,8 +891,7 @@ async def send_dydki_result(message: Message, result: SearchResult, *, lang: str
     cover: bytes | None = None
     try:
         job = _job_dir()
-        proxies = Deps.runtime.proxy_candidates(3)
-        thumbnail, cover = await _artist_audio_thumb(result, job, proxies)
+        thumbnail, cover = await _artist_audio_thumb(result, job)
         await status.set("uploading")
         audio_fields = {
             "title": result.title[:64],
@@ -889,7 +908,7 @@ async def send_dydki_result(message: Message, result: SearchResult, *, lang: str
             # that same Dydki URL once and upload it as a normal MP3 instead.
             log.info("Telegram could not import Dydki stream directly: %s", exc)
             audio_path = await Deps.dydki.download_audio(
-                result.url, job / "dydki-track.mp3", proxy=proxies)
+                result.url, job / "dydki-track.mp3")
             await asyncio.to_thread(tag_audio, audio_path, result.title, result.uploader, cover)
             sent = await message.answer_audio(
                 FSInputFile(str(audio_path),
@@ -941,7 +960,7 @@ async def run_search(message: Message, query: str, *, lang: str, user_id: int,
     try:
         # Song names (and Shazam-recognized tracks) use Dydki's MP3 catalogue,
         # not YouTube search. YouTube remains available for ordinary media URLs.
-        results = await Deps.dydki.search(query, proxy=Deps.runtime.proxy_candidates(3))
+        results = await Deps.dydki.search(query)
     except MediaError as exc:
         with contextlib.suppress(Exception):
             await status_msg.edit_text(t(lang, exc.i18n_key))
@@ -1179,8 +1198,7 @@ async def on_rec_mp3(call: CallbackQuery) -> None:
         return
     # Search the recognized artist/title in Dydki, then send its MP3 stream.
     try:
-        results = await Deps.dydki.search(
-            str(query), proxy=Deps.runtime.proxy_candidates(3))
+        results = await Deps.dydki.search(str(query))
     except MediaError:
         results = []
     if results:
